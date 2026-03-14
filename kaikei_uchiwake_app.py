@@ -134,9 +134,9 @@ def breakdown_table(ledger: pd.DataFrame, account: str, key_col: str) -> pd.Data
     return out
 
 
-def to_excel_bytes(summary: pd.DataFrame, ledger: pd.DataFrame, bs_accounts: List[str], key_col: str) -> bytes:
+def to_excel_bytes(summary: pd.DataFrame, ledger: pd.DataFrame, key_col: str) -> bytes:
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         summary.to_excel(writer, sheet_name="BS残高一覧", index=False)
         for acc in summary["勘定科目"].tolist():
             name = acc[:31] if acc else "sheet"
@@ -148,6 +148,7 @@ def to_excel_bytes(summary: pd.DataFrame, ledger: pd.DataFrame, bs_accounts: Lis
 
 def infer_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
     cols = list(df.columns)
+
     def find(candidates):
         for cand in candidates:
             for col in cols:
@@ -240,13 +241,17 @@ if uploaded:
             detail = detail.sort_values(["日付"], ascending=[True]) if "日付" in detail.columns else detail
             st.dataframe(detail, use_container_width=True, hide_index=True)
 
-        excel_bytes = to_excel_bytes(summary, ledger, bs_accounts, breakdown_key)
-        st.download_button(
-            "Excel出力",
-            data=excel_bytes,
-            file_name="bs_uchiwake_output.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        try:
+            excel_bytes = to_excel_bytes(summary, ledger, breakdown_key)
+            st.download_button(
+                "Excel出力",
+                data=excel_bytes,
+                file_name="bs_uchiwake_output.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception as e:
+            st.error(f"Excel出力でエラーが発生しました: {e}")
+            st.info("requirements.txt に xlsxwriter が入っているか確認してください。")
     else:
         st.info("B/S対象科目に残高が見つかりませんでした。科目名の表記ゆれや、B/S対象勘定科目リストを確認してください。")
 else:
