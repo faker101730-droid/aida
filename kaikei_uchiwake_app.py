@@ -41,7 +41,12 @@ class Cols:
 
 
 def normalize_amount(series: pd.Series) -> pd.Series:
-    s = series.astype(str).str.replace(",", "", regex=False).str.replace("¥", "", regex=False).str.strip()
+    s = (
+        series.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("¥", "", regex=False)
+        .str.strip()
+    )
     s = s.replace({"": None, "nan": None, "None": None})
     return pd.to_numeric(s, errors="coerce").fillna(0)
 
@@ -57,6 +62,7 @@ def load_file(uploaded_file) -> pd.DataFrame:
                 pass
         uploaded_file.seek(0)
         return pd.read_csv(uploaded_file)
+
     uploaded_file.seek(0)
     return pd.read_excel(uploaded_file)
 
@@ -68,37 +74,31 @@ def build_ledger(df: pd.DataFrame, cols: Cols) -> pd.DataFrame:
         work[cols.date] = pd.to_datetime(work[cols.date], errors="coerce")
 
     common = {}
-    if cols.date:
-        common["日付"] = work[cols.date]
-    if cols.partner:
-        common["相手先"] = work[cols.partner].astype(str).replace("nan", "")
-    else:
-        common["相手先"] = ""
-    if cols.memo:
-        common["摘要"] = work[cols.memo].astype(str).replace("nan", "")
-    else:
-        common["摘要"] = ""
-    if cols.voucher:
-        common["伝票番号"] = work[cols.voucher].astype(str).replace("nan", "")
-    else:
-        common["伝票番号"] = ""
+    common["日付"] = work[cols.date] if cols.date else ""
+    common["相手先"] = work[cols.partner].astype(str).replace("nan", "") if cols.partner else ""
+    common["摘要"] = work[cols.memo].astype(str).replace("nan", "") if cols.memo else ""
+    common["伝票番号"] = work[cols.voucher].astype(str).replace("nan", "") if cols.voucher else ""
 
-    debit = pd.DataFrame({
-        **common,
-        "勘定科目": work[cols.debit_account].astype(str).str.strip(),
-        "借方": work[cols.amount],
-        "貸方": 0,
-        "増減": work[cols.amount],
-        "元区分": "借方",
-    })
-    credit = pd.DataFrame({
-        **common,
-        "勘定科目": work[cols.credit_account].astype(str).str.strip(),
-        "借方": 0,
-        "貸方": work[cols.amount],
-        "増減": -work[cols.amount],
-        "元区分": "貸方",
-    })
+    debit = pd.DataFrame(
+        {
+            **common,
+            "勘定科目": work[cols.debit_account].astype(str).str.strip(),
+            "借方": work[cols.amount],
+            "貸方": 0,
+            "増減": work[cols.amount],
+            "元区分": "借方",
+        }
+    )
+    credit = pd.DataFrame(
+        {
+            **common,
+            "勘定科目": work[cols.credit_account].astype(str).str.strip(),
+            "借方": 0,
+            "貸方": work[cols.amount],
+            "増減": -work[cols.amount],
+            "元区分": "貸方",
+        }
+    )
     ledger = pd.concat([debit, credit], ignore_index=True)
     ledger = ledger[ledger["勘定科目"].notna() & (ledger["勘定科目"] != "")]
     return ledger
@@ -108,6 +108,7 @@ def summarize_balances(ledger: pd.DataFrame, bs_accounts: List[str]) -> pd.DataF
     bs = ledger[ledger["勘定科目"].isin(bs_accounts)].copy()
     if bs.empty:
         return pd.DataFrame(columns=["勘定科目", "借方累計", "貸方累計", "残高"])
+
     summary = (
         bs.groupby("勘定科目", as_index=False)
         .agg(借方累計=("借方", "sum"), 貸方累計=("貸方", "sum"), 残高=("増減", "sum"))
@@ -121,10 +122,12 @@ def breakdown_table(ledger: pd.DataFrame, account: str, key_col: str) -> pd.Data
     temp = ledger[ledger["勘定科目"] == account].copy()
     if temp.empty:
         return pd.DataFrame(columns=[key_col, "借方累計", "貸方累計", "残高"])
+
     if key_col not in temp.columns:
         temp[key_col] = ""
     temp[key_col] = temp[key_col].fillna("").replace("nan", "")
     temp[key_col] = temp[key_col].mask(temp[key_col].eq(""), "(空欄)")
+
     out = (
         temp.groupby(key_col, as_index=False)
         .agg(借方累計=("借方", "sum"), 貸方累計=("貸方", "sum"), 残高=("増減", "sum"))
@@ -139,9 +142,8 @@ def to_excel_bytes(summary: pd.DataFrame, ledger: pd.DataFrame, key_col: str) ->
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         summary.to_excel(writer, sheet_name="BS残高一覧", index=False)
         for acc in summary["勘定科目"].tolist():
-            name = acc[:31] if acc else "sheet"
-            bd = breakdown_table(ledger, acc, key_col)
-            bd.to_excel(writer, sheet_name=name, index=False)
+            sheet_name = (acc or "sheet")[:31]
+            breakdown_table(ledger, acc, key_col).to_excel(writer, sheet_name=sheet_name, index=False)
     output.seek(0)
     return output.getvalue()
 
@@ -176,7 +178,12 @@ with st.expander("使い方", expanded=False):
 uploaded = st.file_uploader("仕訳日記帳ファイルをアップロード", type=["csv", "xlsx", "xls"])
 
 if uploaded:
-    df_raw = load_file(uploaded)
+    try:
+        df_raw = load_file(uploaded)
+    except Exception as e:
+        st.error(f"ファイル読込エラー: {e}")
+        st.stop()
+
     st.subheader("アップロードデータ確認")
     st.dataframe(df_raw.head(20), use_container_width=True)
 
@@ -221,38 +228,41 @@ if uploaded:
         voucher=voucher_col or None,
     )
 
-    ledger = build_ledger(df_raw, cols)
-    summary = summarize_balances(ledger, bs_accounts)
+    try:
+        ledger = build_ledger(df_raw, cols)
+        summary = summarize_balances(ledger, bs_accounts)
+    except Exception as e:
+        st.error(f"仕訳展開エラー: {e}")
+        st.stop()
 
-    st.subheader("B/S残高が残っている勘定科目一覧")
-    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.subheader("B/S残高一覧")
+    st.dataframe(summary, use_container_width=True)
 
-    if not summary.empty:
-        selected = st.selectbox("内訳を見たい勘定科目", summary["勘定科目"].tolist())
-        bd = breakdown_table(ledger, selected, breakdown_key)
+    if summary.empty:
+        st.info("B/S対象勘定科目に残高がありません。対象勘定科目の設定や列マッピングを確認してください。")
+        st.stop()
 
-        left, right = st.columns([1.1, 1.4])
-        with left:
-            st.markdown(f"### {selected} 内訳表")
-            st.dataframe(bd, use_container_width=True, hide_index=True)
-        with right:
-            st.markdown(f"### {selected} 仕訳明細")
-            detail = ledger[ledger["勘定科目"] == selected].copy()
-            detail = detail.sort_values(["日付"], ascending=[True]) if "日付" in detail.columns else detail
-            st.dataframe(detail, use_container_width=True, hide_index=True)
+    selected_account = st.selectbox("詳細を見る勘定科目", summary["勘定科目"].tolist())
+    key_col = breakdown_key
 
-        try:
-            excel_bytes = to_excel_bytes(summary, ledger, breakdown_key)
-            st.download_button(
-                "Excel出力",
-                data=excel_bytes,
-                file_name="bs_uchiwake_output.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        except Exception as e:
-            st.error(f"Excel出力でエラーが発生しました: {e}")
-            st.info("requirements.txt に xlsxwriter が入っているか確認してください。")
-    else:
-        st.info("B/S対象科目に残高が見つかりませんでした。科目名の表記ゆれや、B/S対象勘定科目リストを確認してください。")
+    bd = breakdown_table(ledger, selected_account, key_col)
+    st.subheader(f"{selected_account} の内訳表")
+    st.dataframe(bd, use_container_width=True)
+
+    st.subheader(f"{selected_account} の仕訳明細")
+    detail = ledger[ledger["勘定科目"] == selected_account].copy()
+    st.dataframe(detail.sort_values(["日付", "伝票番号"], na_position="last"), use_container_width=True)
+
+    try:
+        excel_bytes = to_excel_bytes(summary, ledger, key_col)
+        st.download_button(
+            "Excel出力",
+            data=excel_bytes,
+            file_name="会計内訳表.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except Exception as e:
+        st.error(f"Excel出力エラー: {e}")
+        st.info("requirements.txt に xlsxwriter と openpyxl が入っているか確認してください。")
 else:
-    st.info("まずは仕訳日記帳CSVまたはExcelをアップロードしてください。")
+    st.info("まずは仕訳日記帳ファイルをアップロードしてください。")
