@@ -243,27 +243,44 @@ def card(label, value, note):
     )
 
 def to_excel(summary, current_detail, history_detail, account, month_text):
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         summary.to_excel(writer, sheet_name="相手先別残高", index=False)
         current_detail.to_excel(writer, sheet_name="当月仕訳明細", index=False)
         history_detail.to_excel(writer, sheet_name="期首算出用履歴", index=False)
-
-        workbook = writer.book
-        currency_fmt = workbook.add_format({"num_format": "#,##0"})
-        header_fmt = workbook.add_format({"bold": True, "bg_color": "#D9E2F3", "border": 1})
-
-        for sheet_name, df in {"相手先別残高": summary, "当月仕訳明細": current_detail, "期首算出用履歴": history_detail}.items():
-            ws = writer.sheets[sheet_name]
-            for col_num, value in enumerate(df.columns.values):
-                ws.write(0, col_num, value, header_fmt)
-                width = max(12, min(28, len(str(value)) + 4))
-                ws.set_column(col_num, col_num, width)
-            for idx, col in enumerate(df.columns):
-                if col in ["期首残高", "当月増加", "当月減少", "期末残高", "金額"]:
-                    ws.set_column(idx, idx, 14, currency_fmt)
-
         pd.DataFrame({"項目": ["対象月", "勘定科目"], "内容": [month_text, account]}).to_excel(writer, sheet_name="出力条件", index=False)
+
+        header_fill = PatternFill(fill_type="solid", fgColor="D9E2F3")
+        header_font = Font(bold=True)
+        center = Alignment(horizontal="center", vertical="center")
+
+        for sheet_name, df in {
+            "相手先別残高": summary,
+            "当月仕訳明細": current_detail,
+            "期首算出用履歴": history_detail,
+            "出力条件": pd.DataFrame({"項目": ["対象月", "勘定科目"], "内容": [month_text, account]}),
+        }.items():
+            ws = writer.sheets[sheet_name]
+
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = center
+
+            for col_idx, col_name in enumerate(df.columns, start=1):
+                max_len = len(str(col_name))
+                for row in range(2, ws.max_row + 1):
+                    value = ws.cell(row=row, column=col_idx).value
+                    if value is not None:
+                        max_len = max(max_len, len(str(value)))
+                    if col_name in ["期首残高", "当月増加", "当月減少", "期末残高", "金額"]:
+                        ws.cell(row=row, column=col_idx).number_format = '#,##0'
+                ws.column_dimensions[get_column_letter(col_idx)].width = max(12, min(28, max_len + 2))
+
+    output.seek(0)
     return output.getvalue()
 
 def style_summary(df: pd.DataFrame):
