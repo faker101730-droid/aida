@@ -244,7 +244,7 @@ def card(label, value, note):
 
 def to_excel(summary, current_detail, history_detail, account, month_text):
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         summary.to_excel(writer, sheet_name="相手先別残高", index=False)
         current_detail.to_excel(writer, sheet_name="当月仕訳明細", index=False)
         history_detail.to_excel(writer, sheet_name="期首算出用履歴", index=False)
