@@ -4,392 +4,394 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="会計内訳生成アプリ 完全版", page_icon="💼", layout="wide")
+st.set_page_config(page_title="会計内訳アプリ Pro", page_icon="📘", layout="wide")
 
-# ----------------------------
-# Styling
-# ----------------------------
 st.markdown("""
 <style>
 .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
-.metric-card {
-    background: linear-gradient(135deg, #132238 0%, #1b3554 100%);
+.kpi-card {
+    background: linear-gradient(135deg, #0f172a 0%, #111827 100%);
+    border: 1px solid #334155;
     border-radius: 18px;
-    padding: 16px 18px;
-    color: white;
-    border: 1px solid rgba(255,255,255,.08);
+    padding: 18px 18px 14px 18px;
+    min-height: 118px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.18);
 }
-.metric-label {font-size: 0.85rem; opacity: .8; margin-bottom: 6px;}
-.metric-value {font-size: 1.55rem; font-weight: 700;}
-.soft-box {
-    background: #f6f8fb;
-    border: 1px solid #e5e9f0;
-    border-radius: 16px;
+.kpi-label {font-size: 0.9rem; color: #cbd5e1; margin-bottom: 6px;}
+.kpi-value {font-size: 2rem; font-weight: 700; color: white; line-height: 1.1;}
+.kpi-note {font-size: 0.8rem; color: #94a3b8; margin-top: 6px;}
+.info-box {
+    background: #0b3b2f;
+    border: 1px solid #14532d;
+    border-radius: 14px;
     padding: 12px 14px;
+    color: #dcfce7;
+    margin-bottom: 0.5rem;
 }
-.small-note {font-size: 0.85rem; color: #5b6574;}
-.section-title {
-    font-size: 1.1rem;
-    font-weight: 700;
-    margin: .3rem 0 .6rem;
+.subtle-box {
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 14px;
+    padding: 12px 14px;
+    color: #cbd5e1;
+    margin-bottom: 0.5rem;
 }
+.small-caption {font-size: 0.82rem; color: #94a3b8;}
 </style>
 """, unsafe_allow_html=True)
 
-BS_DEFAULT = [
-    "現金","普通預金","当座預金","定期預金",
-    "売掛金","未収金","未収入金","立替金","前払費用","前払金","仮払金","貸付金","差入保証金",
-    "商品","貯蔵品","建物","建物附属設備","構築物","機械装置","車両運搬具","工具器具備品","土地","リース資産","ソフトウェア",
-    "買掛金","未払金","未払費用","未払法人税等","未払消費税等","預り金","前受金","前受収益","仮受金","短期借入金","長期借入金","賞与引当金","退職給付引当金",
-    "資本金","資本剰余金","利益剰余金","繰越利益剰余金",
-]
+INIT_REQUIRED = ["基準日", "勘定科目", "相手先", "初期残高"]
+JOURNAL_REQUIRED = ["日付", "借方科目", "貸方科目", "金額", "相手先", "摘要"]
 
-REQUIRED_INIT = ["基準日", "勘定科目", "相手先", "初期残高"]
-REQUIRED_JOURNAL = ["日付", "借方科目", "貸方科目", "金額", "相手先", "摘要"]
-
-# ----------------------------
-# Helpers
-# ----------------------------
-def normalize_headers(df: pd.DataFrame) -> pd.DataFrame:
-    x = df.copy()
-    x.columns = [
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [
         str(c).replace("\n", "").replace("\r", "").replace(" ", "").replace("　", "").strip()
-        for c in x.columns
+        for c in df.columns
     ]
-    return x
+    return df
 
-def normalize_text(s):
-    return str(s).replace("\n", "").replace("\r", "").replace(" ", "").replace("　", "").strip()
+def detect_header_row(raw_df: pd.DataFrame, required_cols: list[str]) -> int:
+    max_scan = min(len(raw_df), 10)
+    need = set(required_cols)
+    for i in range(max_scan):
+        vals = set(
+            str(v).replace("\n", "").replace("\r", "").replace(" ", "").replace("　", "").strip()
+            for v in raw_df.iloc[i].tolist()
+        )
+        if need.issubset(vals):
+            return i
+    return 0
 
-def normalize_amount(series: pd.Series) -> pd.Series:
-    s = (
-        series.astype(str)
-        .str.replace(",", "", regex=False)
-        .str.replace("¥", "", regex=False)
-        .str.replace("円", "", regex=False)
-        .str.replace("△", "-", regex=False)
-        .str.strip()
-    )
-    s = s.replace({"": None, "nan": None, "None": None, "-": None})
-    return pd.to_numeric(s, errors="coerce").fillna(0)
+def read_any_table(uploaded_file):
+    suffix = Path(uploaded_file.name).suffix.lower()
+    if suffix in [".xlsx", ".xlsm", ".xls"]:
+        raw = pd.read_excel(uploaded_file, header=None)
+        uploaded_file.seek(0)
+        return raw
+    elif suffix == ".csv":
+        last_err = None
+        for enc in ["utf-8-sig", "cp932", "utf-8"]:
+            try:
+                raw = pd.read_csv(uploaded_file, header=None, encoding=enc)
+                uploaded_file.seek(0)
+                return raw
+            except Exception as e:
+                last_err = e
+                uploaded_file.seek(0)
+        raise ValueError(f"CSV読込に失敗しました: {last_err}")
+    else:
+        raise ValueError("対応形式は CSV / XLSX / XLS です。")
 
-def read_csv_safely(file):
-    for enc in ["utf-8-sig", "cp932", "utf-8", "shift_jis"]:
-        try:
-            file.seek(0)
-            return pd.read_csv(file, encoding=enc)
-        except Exception:
-            continue
-    file.seek(0)
-    return pd.read_csv(file)
+def parse_file(uploaded_file):
+    raw = read_any_table(uploaded_file)
+    init_row = detect_header_row(raw, INIT_REQUIRED)
+    journal_row = detect_header_row(raw, JOURNAL_REQUIRED)
+    parsed_init = None
+    parsed_journal = None
 
-def detect_header_row_excel(file, expected_cols, max_rows=8):
-    for header in range(max_rows):
-        try:
-            file.seek(0)
-            df = pd.read_excel(file, header=header)
-            df = normalize_headers(df)
-            if set(expected_cols).issubset(set(df.columns)):
-                return df
-        except Exception:
-            continue
-    file.seek(0)
-    return normalize_headers(pd.read_excel(file))
+    try:
+        uploaded_file.seek(0)
+        if Path(uploaded_file.name).suffix.lower() in [".xlsx", ".xlsm", ".xls"]:
+            parsed_init = pd.read_excel(uploaded_file, header=init_row)
+        else:
+            for enc in ["utf-8-sig", "cp932", "utf-8"]:
+                try:
+                    uploaded_file.seek(0)
+                    parsed_init = pd.read_csv(uploaded_file, header=init_row, encoding=enc)
+                    break
+                except Exception:
+                    continue
+        if parsed_init is not None:
+            parsed_init = normalize_columns(parsed_init)
+    except Exception:
+        parsed_init = None
 
-def load_any_table(file, expected_cols=None):
-    name = file.name.lower()
-    if name.endswith(".csv"):
-        df = read_csv_safely(file)
-        return normalize_headers(df)
-    if expected_cols is None:
-        file.seek(0)
-        return normalize_headers(pd.read_excel(file))
-    return detect_header_row_excel(file, expected_cols)
+    try:
+        uploaded_file.seek(0)
+        if Path(uploaded_file.name).suffix.lower() in [".xlsx", ".xlsm", ".xls"]:
+            parsed_journal = pd.read_excel(uploaded_file, header=journal_row)
+        else:
+            for enc in ["utf-8-sig", "cp932", "utf-8"]:
+                try:
+                    uploaded_file.seek(0)
+                    parsed_journal = pd.read_csv(uploaded_file, header=journal_row, encoding=enc)
+                    break
+                except Exception:
+                    continue
+        if parsed_journal is not None:
+            parsed_journal = normalize_columns(parsed_journal)
+    except Exception:
+        parsed_journal = None
 
-def detect_file_kind(df: pd.DataFrame):
-    cols = set(normalize_headers(df).columns)
-    if set(REQUIRED_INIT).issubset(cols):
-        return "initial"
-    if set(REQUIRED_JOURNAL).issubset(cols):
-        return "journal"
-    return "unknown"
+    def has_cols(df, cols):
+        return df is not None and set(cols).issubset(df.columns)
 
-def ensure_required(df, required, name):
-    missing = [c for c in required if c not in df.columns]
+    if has_cols(parsed_init, INIT_REQUIRED) and not has_cols(parsed_journal, JOURNAL_REQUIRED):
+        return "initial", parsed_init
+    if has_cols(parsed_journal, JOURNAL_REQUIRED) and not has_cols(parsed_init, INIT_REQUIRED):
+        return "journal", parsed_journal
+    if has_cols(parsed_init, INIT_REQUIRED) and has_cols(parsed_journal, JOURNAL_REQUIRED):
+        name = uploaded_file.name.lower()
+        if "initial" in name or "balance" in name or "残高" in name:
+            return "initial", parsed_init
+        if "journal" in name or "仕訳" in name:
+            return "journal", parsed_journal
+        return ("initial", parsed_init) if init_row <= journal_row else ("journal", parsed_journal)
+
+    raise ValueError("必要列を判定できませんでした。初期残高か仕訳マスタの形式を確認してください。")
+
+def prepare_initial(df: pd.DataFrame) -> pd.DataFrame:
+    missing = [c for c in INIT_REQUIRED if c not in df.columns]
     if missing:
-        raise ValueError(f"{name}に必要列が不足しています：{', '.join(missing)}")
-
-def build_ledger(journal_df: pd.DataFrame) -> pd.DataFrame:
-    work = journal_df.copy()
-    work = normalize_headers(work)
-    ensure_required(work, REQUIRED_JOURNAL, "全期間仕訳マスタ")
-    work["日付"] = pd.to_datetime(work["日付"], errors="coerce")
-    work["金額"] = normalize_amount(work["金額"])
-    for c in ["相手先", "摘要"]:
-        work[c] = work[c].fillna("").astype(str).replace("nan", "")
-    if "伝票番号" not in work.columns:
-        work["伝票番号"] = ""
-
-    debit = pd.DataFrame({
-        "日付": work["日付"],
-        "勘定科目": work["借方科目"].astype(str).str.strip(),
-        "相手先": work["相手先"].astype(str).str.strip().replace("", "(空欄)"),
-        "摘要": work["摘要"].astype(str).str.strip(),
-        "伝票番号": work["伝票番号"].astype(str).str.strip(),
-        "借方": work["金額"],
-        "貸方": 0,
-        "増減": work["金額"],
-        "元区分": "借方",
-    })
-    credit = pd.DataFrame({
-        "日付": work["日付"],
-        "勘定科目": work["貸方科目"].astype(str).str.strip(),
-        "相手先": work["相手先"].astype(str).str.strip().replace("", "(空欄)"),
-        "摘要": work["摘要"].astype(str).str.strip(),
-        "伝票番号": work["伝票番号"].astype(str).str.strip(),
-        "借方": 0,
-        "貸方": work["金額"],
-        "増減": -work["金額"],
-        "元区分": "貸方",
-    })
-    ledger = pd.concat([debit, credit], ignore_index=True)
-    ledger["相手先"] = ledger["相手先"].replace("", "(空欄)")
-    ledger = ledger[ledger["勘定科目"].notna() & (ledger["勘定科目"] != "")]
-    return ledger
-
-def prep_initial(initial_df: pd.DataFrame) -> pd.DataFrame:
-    x = normalize_headers(initial_df)
-    ensure_required(x, REQUIRED_INIT, "初期残高データ")
-    x["基準日"] = pd.to_datetime(x["基準日"], errors="coerce")
-    x["勘定科目"] = x["勘定科目"].astype(str).str.strip()
-    x["相手先"] = x["相手先"].fillna("").astype(str).str.strip().replace("", "(空欄)")
-    x["初期残高"] = normalize_amount(x["初期残高"])
-    if "摘要" not in x.columns:
-        x["摘要"] = ""
-    return x
-
-def month_range(target_month):
-    start = pd.Timestamp(target_month).to_period("M").start_time
-    end = pd.Timestamp(target_month).to_period("M").end_time
-    return start.normalize(), end.normalize()
-
-def account_month_summary(init_df, ledger_df, bs_accounts, target_month):
-    start, end = month_range(target_month)
-    init_bs = init_df[init_df["勘定科目"].isin(bs_accounts)].copy()
-    led_bs = ledger_df[ledger_df["勘定科目"].isin(bs_accounts)].copy()
-
-    prior = led_bs[led_bs["日付"] < start]
-    current = led_bs[(led_bs["日付"] >= start) & (led_bs["日付"] <= end)]
-
-    init_sum = init_bs.groupby("勘定科目", as_index=False)["初期残高"].sum().rename(columns={"初期残高": "初期残高"})
-    prior_sum = prior.groupby("勘定科目", as_index=False)["増減"].sum().rename(columns={"増減": "期首前累計"})
-    curr_inc = current.assign(当月増加=current["増減"].clip(lower=0)).groupby("勘定科目", as_index=False)["当月増加"].sum()
-    curr_dec = current.assign(当月減少=(-current["増減"].clip(upper=0))).groupby("勘定科目", as_index=False)["当月減少"].sum()
-
-    accounts = pd.DataFrame({"勘定科目": sorted(set(init_bs["勘定科目"]).union(set(led_bs["勘定科目"])))})
-    out = accounts.merge(init_sum, on="勘定科目", how="left").merge(prior_sum, on="勘定科目", how="left").merge(curr_inc, on="勘定科目", how="left").merge(curr_dec, on="勘定科目", how="left")
-    for col in ["初期残高", "期首前累計", "当月増加", "当月減少"]:
-        out[col] = out[col].fillna(0)
-    out["期首残高"] = out["初期残高"] + out["期首前累計"]
-    out["当月増減"] = out["当月増加"] - out["当月減少"]
-    out["期末残高"] = out["期首残高"] + out["当月増減"]
-    out = out[(out["期首残高"].round(0) != 0) | (out["当月増加"].round(0) != 0) | (out["当月減少"].round(0) != 0) | (out["期末残高"].round(0) != 0)].copy()
-    out = out.sort_values("期末残高", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
+        raise ValueError("初期残高に必要列が不足しています: " + ", ".join(missing))
+    out = df[INIT_REQUIRED].copy()
+    out["基準日"] = pd.to_datetime(out["基準日"], errors="coerce")
+    out["初期残高"] = out["初期残高"].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False)
+    out["初期残高"] = pd.to_numeric(out["初期残高"], errors="coerce").fillna(0)
+    out["勘定科目"] = out["勘定科目"].astype(str).str.strip()
+    out["相手先"] = out["相手先"].astype(str).str.strip()
+    if out["基準日"].isna().any():
+        raise ValueError("初期残高の基準日に日付変換できない値があります。")
     return out
 
-def partner_breakdown(init_df, ledger_df, account, target_month):
-    start, end = month_range(target_month)
-    init_acc = init_df[init_df["勘定科目"] == account].copy()
-    prior = ledger_df[(ledger_df["勘定科目"] == account) & (ledger_df["日付"] < start)].copy()
-    current = ledger_df[(ledger_df["勘定科目"] == account) & (ledger_df["日付"] >= start) & (ledger_df["日付"] <= end)].copy()
-
-    init_sum = init_acc.groupby("相手先", as_index=False)["初期残高"].sum()
-    prior_sum = prior.groupby("相手先", as_index=False)["増減"].sum().rename(columns={"増減": "期首前累計"})
-    curr_inc = current.assign(当月増加=current["増減"].clip(lower=0)).groupby("相手先", as_index=False)["当月増加"].sum()
-    curr_dec = current.assign(当月減少=(-current["増減"].clip(upper=0))).groupby("相手先", as_index=False)["当月減少"].sum()
-
-    partners = pd.DataFrame({"相手先": sorted(set(init_acc["相手先"]).union(set(prior["相手先"])).union(set(current["相手先"])))})
-    if partners.empty:
-        return pd.DataFrame(columns=["相手先","期首残高","当月増加","当月減少","当月増減","期末残高"])
-    out = partners.merge(init_sum, on="相手先", how="left").merge(prior_sum, on="相手先", how="left").merge(curr_inc, on="相手先", how="left").merge(curr_dec, on="相手先", how="left")
-    for col in ["初期残高", "期首前累計", "当月増加", "当月減少"]:
-        out[col] = out[col].fillna(0)
-    out["期首残高"] = out["初期残高"] + out["期首前累計"]
-    out["当月増減"] = out["当月増加"] - out["当月減少"]
-    out["期末残高"] = out["期首残高"] + out["当月増減"]
-    out = out[(out["期首残高"].round(0) != 0) | (out["当月増加"].round(0) != 0) | (out["当月減少"].round(0) != 0) | (out["期末残高"].round(0) != 0)].copy()
-    out["異常フラグ"] = ""
-    out.loc[out["期末残高"] < 0, "異常フラグ"] = "マイナス残高"
-    out = out.sort_values("期末残高", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
+def prepare_journal(df: pd.DataFrame) -> pd.DataFrame:
+    missing = [c for c in JOURNAL_REQUIRED if c not in df.columns]
+    if missing:
+        raise ValueError("仕訳マスタに必要列が不足しています: " + ", ".join(missing))
+    out = df[JOURNAL_REQUIRED].copy()
+    out["日付"] = pd.to_datetime(out["日付"], errors="coerce")
+    out["金額"] = out["金額"].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False)
+    out["金額"] = pd.to_numeric(out["金額"], errors="coerce")
+    for col in ["借方科目", "貸方科目", "相手先", "摘要"]:
+        out[col] = out[col].astype(str).str.strip()
+    if out["日付"].isna().any():
+        raise ValueError("仕訳マスタの日付に日付変換できない値があります。")
+    if out["金額"].isna().any():
+        raise ValueError("仕訳マスタの金額に数値変換できない値があります。")
     return out
 
-def details_for_account(ledger_df, account, target_month):
-    start, end = month_range(target_month)
-    prior = ledger_df[(ledger_df["勘定科目"] == account) & (ledger_df["日付"] < start)].copy()
-    current = ledger_df[(ledger_df["勘定科目"] == account) & (ledger_df["日付"] >= start) & (ledger_df["日付"] <= end)].copy()
-    prior = prior.sort_values(["日付","相手先","摘要"])
-    current = current.sort_values(["日付","相手先","摘要"])
-    return prior, current
+def choose_accounts(initial_df, journal_df):
+    accounts = set(initial_df["勘定科目"].dropna().unique().tolist())
+    accounts.update(journal_df["借方科目"].dropna().unique().tolist())
+    accounts.update(journal_df["貸方科目"].dropna().unique().tolist())
+    return sorted([a for a in accounts if str(a).strip() and str(a) != "nan"])
 
-def format_df_for_display(df):
-    x = df.copy()
-    num_cols = x.select_dtypes(include="number").columns
-    for c in num_cols:
-        x[c] = x[c].round(0).astype(int)
-    return x
+def month_options(initial_df, journal_df):
+    dates = pd.concat([initial_df["基準日"], journal_df["日付"]]).dropna()
+    return sorted(dates.dt.to_period("M").astype(str).unique().tolist())
 
-def to_excel_bytes(summary_df, partner_df, prior_df, current_df, target_month, account):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, sheet_name="勘定科目残高一覧", index=False)
-        partner_df.to_excel(writer, sheet_name="相手先別内訳", index=False)
-        prior_df.to_excel(writer, sheet_name="期首算出用履歴", index=False)
-        current_df.to_excel(writer, sheet_name="当月仕訳明細", index=False)
-    output.seek(0)
-    return output.getvalue()
+def build_summary(initial_df, journal_df, account, target_month):
+    target_period = pd.Period(target_month)
+    month_start = target_period.start_time
+    month_end = target_period.end_time
+    init_base = initial_df["基準日"].max()
 
-# ----------------------------
-# UI
-# ----------------------------
-st.title("💼 会計内訳生成アプリ 完全版")
-st.caption("初期残高＋全期間仕訳マスタから、対象月の期首残高・当月増減・期末残高を自動表示します。")
+    if month_start <= init_base:
+        raise ValueError("対象月が初期残高基準日以前です。基準日より後の月を選択してください。")
 
-left, right = st.columns([1, 2], gap="large")
+    init_acc = initial_df[initial_df["勘定科目"] == account].copy()
+    before = journal_df[(journal_df["日付"] > init_base) & (journal_df["日付"] < month_start)].copy()
+    current = journal_df[(journal_df["日付"] >= month_start) & (journal_df["日付"] <= month_end)].copy()
 
-with left:
-    st.markdown('<div class="section-title">📂 データ読み込み</div>', unsafe_allow_html=True)
-    init_file = st.file_uploader("① 初期残高データ", type=["csv", "xlsx", "xls"], key="init")
-    journal_file = st.file_uploader("② 全期間仕訳マスタ", type=["csv", "xlsx", "xls"], key="journal")
+    init_partner = init_acc.groupby("相手先", dropna=False)["初期残高"].sum().rename("期首初期残高").reset_index()
+    inc_before = before[before["借方科目"] == account].groupby("相手先", dropna=False)["金額"].sum().rename("前月まで増加").reset_index()
+    dec_before = before[before["貸方科目"] == account].groupby("相手先", dropna=False)["金額"].sum().rename("前月まで減少").reset_index()
+    inc_cur = current[current["借方科目"] == account].groupby("相手先", dropna=False)["金額"].sum().rename("当月増加").reset_index()
+    dec_cur = current[current["貸方科目"] == account].groupby("相手先", dropna=False)["金額"].sum().rename("当月減少").reset_index()
 
+    summary = init_partner.merge(inc_before, on="相手先", how="outer") \
+                         .merge(dec_before, on="相手先", how="outer") \
+                         .merge(inc_cur, on="相手先", how="outer") \
+                         .merge(dec_cur, on="相手先", how="outer")
+    if summary.empty:
+        summary = pd.DataFrame({"相手先": []})
+    for col in ["期首初期残高", "前月まで増加", "前月まで減少", "当月増加", "当月減少"]:
+        if col not in summary.columns:
+            summary[col] = 0
+        summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0)
+
+    summary["期首残高"] = summary["期首初期残高"] + summary["前月まで増加"] - summary["前月まで減少"]
+    summary["期末残高"] = summary["期首残高"] + summary["当月増加"] - summary["当月減少"]
+    summary["マイナス残高"] = summary["期末残高"] < 0
+    summary["当月動きなし"] = (summary["当月増加"].abs() + summary["当月減少"].abs()) == 0
+    summary["長期残存候補"] = (summary["期首残高"] != 0) & (summary["当月動きなし"])
+
+    summary = summary[["相手先", "期首残高", "当月増加", "当月減少", "期末残高", "長期残存候補", "マイナス残高"]].copy()
+    summary = summary.sort_values(["期末残高", "相手先"], ascending=[False, True]).reset_index(drop=True)
+
+    history_detail = before[(before["借方科目"] == account) | (before["貸方科目"] == account)].copy()
+    current_detail = current[(current["借方科目"] == account) | (current["貸方科目"] == account)].copy()
+    return summary, history_detail, current_detail, init_base, month_start, month_end
+
+def fmt_yen(x):
+    try:
+        return f"{int(round(x, 0)):,}"
+    except Exception:
+        return x
+
+def card(label, value, note):
     st.markdown(
-        '<div class="soft-box small-note">推奨列名<br>初期残高：基準日 / 勘定科目 / 相手先 / 初期残高<br>仕訳マスタ：日付 / 借方科目 / 貸方科目 / 金額 / 相手先 / 摘要</div>',
+        f"""
+        <div class="kpi-card">
+            <div class="kpi-label">{label}</div>
+            <div class="kpi-value">{fmt_yen(value)}</div>
+            <div class="kpi-note">{note}</div>
+        </div>
+        """,
         unsafe_allow_html=True
     )
 
-    bs_text = st.text_area("B/S対象勘定科目（改行区切り）", value="\n".join(BS_DEFAULT), height=220)
-    bs_accounts = [x.strip() for x in bs_text.splitlines() if x.strip()]
+def to_excel(summary, current_detail, history_detail, account, month_text):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        summary.to_excel(writer, sheet_name="相手先別残高", index=False)
+        current_detail.to_excel(writer, sheet_name="当月仕訳明細", index=False)
+        history_detail.to_excel(writer, sheet_name="期首算出用履歴", index=False)
 
-if init_file and journal_file:
-    try:
-        init_df_raw = load_any_table(init_file, expected_cols=REQUIRED_INIT)
-        journal_df_raw = load_any_table(journal_file, expected_cols=REQUIRED_JOURNAL)
+        workbook = writer.book
+        currency_fmt = workbook.add_format({"num_format": "#,##0"})
+        header_fmt = workbook.add_format({"bold": True, "bg_color": "#D9E2F3", "border": 1})
 
-        kind1 = detect_file_kind(init_df_raw)
-        kind2 = detect_file_kind(journal_df_raw)
+        for sheet_name, df in {"相手先別残高": summary, "当月仕訳明細": current_detail, "期首算出用履歴": history_detail}.items():
+            ws = writer.sheets[sheet_name]
+            for col_num, value in enumerate(df.columns.values):
+                ws.write(0, col_num, value, header_fmt)
+                width = max(12, min(28, len(str(value)) + 4))
+                ws.set_column(col_num, col_num, width)
+            for idx, col in enumerate(df.columns):
+                if col in ["期首残高", "当月増加", "当月減少", "期末残高", "金額"]:
+                    ws.set_column(idx, idx, 14, currency_fmt)
 
-        if kind1 == "journal" and kind2 == "initial":
-            init_df_raw, journal_df_raw = journal_df_raw, init_df_raw
-            st.info("アップロード順を自動で補正しました。")
-        elif kind1 == "unknown" or kind2 == "unknown":
-            st.warning("列名が想定と異なるファイルがあります。テンプレート列名に合わせてください。")
+        pd.DataFrame({"項目": ["対象月", "勘定科目"], "内容": [month_text, account]}).to_excel(writer, sheet_name="出力条件", index=False)
+    return output.getvalue()
 
-        init_df = prep_initial(init_df_raw)
-        ledger_df = build_ledger(journal_df_raw)
+def style_summary(df: pd.DataFrame):
+    def row_style(row):
+        if row.get("マイナス残高", False):
+            return ["background-color: #4c0519; color: #ffe4e6;" for _ in row.index]
+        if row.get("長期残存候補", False):
+            return ["background-color: #3b2f0b; color: #fef3c7;" for _ in row.index]
+        return ["" for _ in row.index]
 
-        if ledger_df["日付"].notna().sum() == 0:
-            st.error("仕訳マスタの日付を認識できませんでした。日付列を確認してください。")
-            st.stop()
+    return df.style.apply(row_style, axis=1).format({
+        "期首残高": "{:,.0f}",
+        "当月増加": "{:,.0f}",
+        "当月減少": "{:,.0f}",
+        "期末残高": "{:,.0f}",
+    })
 
-        available_months = sorted(ledger_df["日付"].dropna().dt.to_period("M").astype(str).unique().tolist())
-        if not available_months:
-            st.error("対象月を作れませんでした。仕訳マスタの日付列を確認してください。")
-            st.stop()
+def style_detail(df: pd.DataFrame):
+    format_map = {}
+    for col in ["金額", "初期残高", "期首残高", "当月増加", "当月減少", "期末残高"]:
+        if col in df.columns:
+            format_map[col] = "{:,.0f}"
+    if "日付" in df.columns:
+        try:
+            x = df.copy()
+            x["日付"] = pd.to_datetime(x["日付"], errors="coerce").dt.strftime("%Y-%m-%d")
+            return x.style.format(format_map)
+        except Exception:
+            return df.style.format(format_map)
+    return df.style.format(format_map)
 
-        with right:
-            ctl1, ctl2 = st.columns([1,1])
-            with ctl1:
-                target_month = st.selectbox("対象月", options=available_months, index=len(available_months)-1)
-            summary_df = account_month_summary(init_df, ledger_df, bs_accounts, target_month)
-            if summary_df.empty:
-                st.warning("対象月に表示対象となるB/S科目がありません。")
-                st.stop()
-            with ctl2:
-                selected_account = st.selectbox("勘定科目", options=summary_df["勘定科目"].tolist())
+st.title("📘 会計内訳アプリ Pro")
+st.caption("初期残高 + 全期間仕訳マスタ から、対象月の期首残高・当月増減・期末残高を相手先別に可視化します。")
 
-            selected_row = summary_df[summary_df["勘定科目"] == selected_account].iloc[0]
-            partner_df = partner_breakdown(init_df, ledger_df, selected_account, target_month)
-            prior_df, current_df = details_for_account(ledger_df, selected_account, target_month)
+with st.sidebar:
+    st.header("📂 データ読み込み")
+    with st.expander("アップロードと入力ルール", expanded=False):
+        init_up = st.file_uploader("① 初期残高データ", type=["csv", "xlsx", "xls"])
+        journal_up = st.file_uploader("② 全期間仕訳マスタ", type=["csv", "xlsx", "xls"])
+        st.markdown("<div class='small-caption'>推奨列名</div>", unsafe_allow_html=True)
+        st.code("初期残高: 基準日 / 勘定科目 / 相手先 / 初期残高\n仕訳マスタ: 日付 / 借方科目 / 貸方科目 / 金額 / 相手先 / 摘要")
 
-            st.markdown(
-                f"""
-                <div class="small-note">
-                初期残高基準日: {init_df["基準日"].dropna().max().date() if init_df["基準日"].notna().any() else "-"}　
-                ／　対象月: {target_month}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+if not init_up or not journal_up:
+    st.info("左のサイドバーから初期残高データと全期間仕訳マスタをアップロードしてください。")
+    st.stop()
 
-            m1, m2, m3, m4 = st.columns(4)
-            metrics = [
-                ("期首残高", selected_row["期首残高"]),
-                ("当月増加", selected_row["当月増加"]),
-                ("当月減少", selected_row["当月減少"]),
-                ("期末残高", selected_row["期末残高"]),
-            ]
-            for col, (label, val) in zip([m1,m2,m3,m4], metrics):
-                with col:
-                    st.markdown(
-                        f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value">{val:,.0f}</div></div>',
-                        unsafe_allow_html=True
-                    )
+try:
+    type1, df1 = parse_file(init_up)
+    type2, df2 = parse_file(journal_up)
+    parsed = {type1: df1, type2: df2}
+    if "initial" not in parsed or "journal" not in parsed:
+        raise ValueError("アップロード2ファイルから初期残高と仕訳マスタを判定できませんでした。")
+    initial_df = prepare_initial(parsed["initial"])
+    journal_df = prepare_journal(parsed["journal"])
+except Exception as e:
+    st.error(f"読み込みエラー：{e}")
+    st.stop()
 
-            tab1, tab2, tab3, tab4 = st.tabs(["📊 勘定科目残高一覧", "📋 相手先別内訳", "🔎 明細ドリルダウン", "📥 Excel出力"])
+accounts = choose_accounts(initial_df, journal_df)
+months = month_options(initial_df, journal_df)
+if not months:
+    st.warning("対象月候補がありません。日付データを確認してください。")
+    st.stop()
 
-            with tab1:
-                show_summary = format_df_for_display(summary_df[["勘定科目","期首残高","当月増加","当月減少","当月増減","期末残高"]])
-                st.dataframe(show_summary, use_container_width=True, hide_index=True)
-                st.caption("対象月の勘定科目別残高一覧です。期首残高・当月増減・期末残高を表示します。")
+c1, c2 = st.columns([1, 1])
+with c1:
+    target_month = st.selectbox("対象月", options=months, index=len(months)-1)
+with c2:
+    default_idx = accounts.index("未払金") if "未払金" in accounts else 0
+    account = st.selectbox("勘定科目", options=accounts, index=default_idx)
 
-            with tab2:
-                show_partner = format_df_for_display(partner_df[["相手先","期首残高","当月増加","当月減少","当月増減","期末残高","異常フラグ"]]) if not partner_df.empty else partner_df
-                st.dataframe(show_partner, use_container_width=True, hide_index=True)
-                st.caption("選択した勘定科目の相手先別内訳です。マイナス残高は異常フラグを表示します。")
+try:
+    summary, history_detail, current_detail, init_base, month_start, month_end = build_summary(initial_df, journal_df, account, target_month)
+except Exception as e:
+    st.error(f"集計エラー：{e}")
+    st.stop()
 
-            with tab3:
-                a, b = st.columns(2)
-                with a:
-                    st.markdown("**期首算出用の過去履歴**")
-                    st.dataframe(format_df_for_display(prior_df), use_container_width=True, hide_index=True)
-                with b:
-                    st.markdown("**当月仕訳明細**")
-                    st.dataframe(format_df_for_display(current_df), use_container_width=True, hide_index=True)
+view_summary = summary.copy()
 
-            with tab4:
-                excel_bytes = to_excel_bytes(
-                    format_df_for_display(summary_df[["勘定科目","期首残高","当月増加","当月減少","当月増減","期末残高"]]),
-                    format_df_for_display(partner_df),
-                    format_df_for_display(prior_df),
-                    format_df_for_display(current_df),
-                    target_month,
-                    selected_account
-                )
-                st.download_button(
-                    "Excelをダウンロード",
-                    data=excel_bytes,
-                    file_name=f"会計内訳_{target_month}_{selected_account}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+col_info1, col_info2 = st.columns([1, 2])
+with col_info1:
+    st.markdown(f"<div class='info-box'><b>初期残高基準日:</b> {init_base.strftime('%Y-%m-%d')}</div>", unsafe_allow_html=True)
+with col_info2:
+    st.markdown(f"<div class='subtle-box'><b>対象月:</b> {target_month}・この月の <b>期首残高 / 当月増加 / 当月減少 / 期末残高</b> を表示しています。</div>", unsafe_allow_html=True)
 
-            with st.expander("プレビュー（読み込みデータ確認）", expanded=False):
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown("**初期残高**")
-                    st.dataframe(init_df.head(20), use_container_width=True)
-                with c2:
-                    st.markdown("**仕訳マスタ（先頭20行）**")
-                    st.dataframe(journal_df_raw.head(20), use_container_width=True)
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    card("期首残高", view_summary["期首残高"].sum(), "対象月開始時点の残高")
+with k2:
+    card("当月増加", view_summary["当月増加"].sum(), "借方側で増えた金額")
+with k3:
+    card("当月減少", view_summary["当月減少"].sum(), "貸方側で減った金額")
+with k4:
+    card("期末残高", view_summary["期末残高"].sum(), "対象月終了時点の残高")
 
-    except Exception as e:
-        st.error(f"読み込みエラー：{e}")
-else:
-    with right:
-        st.info("左側から初期残高データと全期間仕訳マスタをアップロードしてください。")
-        st.markdown("""
-        #### この完全版でできること
-        - 初期残高＋全期間仕訳マスタによる繰越計算
-        - 対象月の期首残高 / 当月増加 / 当月減少 / 期末残高の表示
-        - 相手先別の内訳表
-        - 期首算出用履歴と当月仕訳明細のドリルダウン
-        - Excel出力
-        """)
+with st.sidebar:
+    with st.expander("表示条件", expanded=False):
+        hide_zero = st.checkbox("期末残高ゼロの相手先を非表示", value=True)
+        only_warning = st.checkbox("注意行のみ表示", value=False)
+        partner_kw = st.text_input("相手先検索", value="")
+
+if hide_zero:
+    view_summary = view_summary[view_summary["期末残高"] != 0]
+if only_warning:
+    view_summary = view_summary[(view_summary["長期残存候補"]) | (view_summary["マイナス残高"])]
+if partner_kw.strip():
+    view_summary = view_summary[view_summary["相手先"].astype(str).str.contains(partner_kw.strip(), case=False, na=False)]
+
+tab1, tab2, tab3, tab4 = st.tabs(["📊 相手先別残高", "🧾 当月仕訳明細", "🕰️ 期首算出用履歴", "📥 Excel出力"])
+with tab1:
+    st.subheader(f"{target_month} {account} 相手先別残高")
+    st.caption("黄色は長期残存候補、赤はマイナス残高です。")
+    st.dataframe(style_summary(view_summary), use_container_width=True, height=460)
+    st.caption(f"表示件数: {len(view_summary)}件")
+with tab2:
+    st.subheader(f"{target_month} 当月仕訳明細")
+    st.dataframe(style_detail(current_detail.sort_values(["日付", "相手先"]).reset_index(drop=True)), use_container_width=True, height=460)
+with tab3:
+    st.subheader("期首算出用履歴")
+    st.caption(f"{init_base.strftime('%Y-%m-%d')} の初期残高から {month_start.strftime('%Y-%m-%d')} の前日までの履歴")
+    st.dataframe(style_detail(history_detail.sort_values(["日付", "相手先"]).reset_index(drop=True)), use_container_width=True, height=460)
+with tab4:
+    st.subheader("Excel出力")
+    excel_bytes = to_excel(view_summary.reset_index(drop=True), current_detail, history_detail, account, target_month)
+    st.download_button(
+        "📥 Excelダウンロード",
+        data=excel_bytes,
+        file_name=f"会計内訳_{account}_{target_month}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.caption("出力内容: 相手先別残高 / 当月仕訳明細 / 期首算出用履歴 / 出力条件")
