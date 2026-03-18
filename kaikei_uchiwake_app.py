@@ -4,116 +4,508 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="会計内訳アプリ Pro", layout="wide")
-st.title("📘 会計内訳アプリ Pro")
+st.set_page_config(page_title="会計内訳アプリ Pro 福祉の森完全対応版", page_icon="📘", layout="wide")
 
-COL_MAP = {
-    "日付": ["日付","伝票日付"],
-    "借方中区分": ["借方中区分","借方科目（中区分）","借方科目(中区分)"],
-    "貸方中区分": ["貸方中区分","貸方科目（中区分）","貸方科目(中区分)"],
-    "借方小区分": ["借方小区分","借方科目（小区分）","借方科目(小区分)"],
-    "貸方小区分": ["貸方小区分","貸方科目（小区分）","貸方科目(小区分)"],
-    "借方金額": ["借方金額"],
-    "貸方金額": ["貸方金額"],
-    "摘要": ["摘要","摘要文"]
+st.markdown("""
+<style>
+.block-container {padding-top: 1.0rem; padding-bottom: 2rem;}
+.kpi-card {
+    background: linear-gradient(135deg, #0f172a 0%, #111827 100%);
+    border: 1px solid #334155;
+    border-radius: 18px;
+    padding: 18px 18px 14px 18px;
+    min-height: 118px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.18);
+}
+.kpi-label {font-size: 0.9rem; color: #cbd5e1; margin-bottom: 6px;}
+.kpi-value {font-size: 2rem; font-weight: 700; color: white; line-height: 1.1;}
+.kpi-note {font-size: 0.8rem; color: #94a3b8; margin-top: 6px;}
+.info-box {
+    background: #0b3b2f;
+    border: 1px solid #14532d;
+    border-radius: 14px;
+    padding: 12px 14px;
+    color: #dcfce7;
+    margin-bottom: 0.5rem;
+}
+.subtle-box {
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 14px;
+    padding: 12px 14px;
+    color: #cbd5e1;
+    margin-bottom: 0.5rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
+INIT_REQUIRED = ["基準日", "勘定科目", "相手先", "初期残高"]
+STANDARD_REQUIRED = ["日付", "借方科目", "貸方科目", "金額", "相手先", "摘要"]
+
+COLUMN_ALIASES = {
+    "日付": ["日付", "伝票日付", "起票日", "処理日"],
+    "借方中区分": ["借方中区分", "借方科目（中区分）", "借方科目(中区分)", "借方中分類", "借方中科目"],
+    "借方小区分": ["借方小区分", "借方科目（小区分）", "借方科目(小区分)", "借方小分類", "借方小科目"],
+    "借方補助区分": ["借方補助区分", "借方補助", "借方補助科目", "借方補助区分名"],
+    "借方取引先": ["借方取引先", "借方先方", "借方相手先", "借方補助先", "借方取引先名"],
+    "借方金額": ["借方金額", "借方金額（円）", "借方金額(円)"],
+    "貸方中区分": ["貸方中区分", "貸方科目（中区分）", "貸方科目(中区分)", "貸方中分類", "貸方中科目"],
+    "貸方小区分": ["貸方小区分", "貸方科目（小区分）", "貸方科目(小区分)", "貸方小分類", "貸方小科目"],
+    "貸方補助区分": ["貸方補助区分", "貸方補助", "貸方補助科目", "貸方補助区分名"],
+    "貸方取引先": ["貸方取引先", "貸方先方", "貸方相手先", "貸方補助先", "貸方取引先名"],
+    "貸方金額": ["貸方金額", "貸方金額（円）", "貸方金額(円)"],
+    "摘要文": ["摘要文", "摘要", "摘要内容", "取引摘要", "明細摘要"],
+    "伝票番号": ["伝票番号", "伝票No", "伝票NO", "伝票Ｎｏ", "伝票番号No"],
 }
 
-def normalize(df):
+BS_DEFAULT = [
+    "現金","現金預金","普通預金","小口現金","立替金","未収金","未収入金","前払費用","前払金","仮払金","貸付金",
+    "未払金","未払費用","預り金","前受金","仮受金","借入金","賞与引当金","退職給付引当金","繰越利益剰余金"
+]
+
+def normalize_name(x: str) -> str:
+    return str(x).replace("\n", "").replace("\r", "").replace(" ", "").replace("　", "").strip()
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df.columns = [str(c).replace(" ","").replace("　","").strip() for c in df.columns]
+    df.columns = [normalize_name(c) for c in df.columns]
     return df
 
-def map_columns(df):
-    df = normalize(df)
-    rename = {}
-    for k, vals in COL_MAP.items():
-        for v in vals:
-            if v in df.columns:
-                rename[v] = k
-                break
-    return df.rename(columns=rename)
+def read_any_table(uploaded_file, header=None):
+    suffix = Path(uploaded_file.name).suffix.lower()
+    if suffix in [".xlsx", ".xlsm", ".xls"]:
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file, header=header)
+    for enc in ["utf-8-sig", "cp932", "utf-8", "shift_jis"]:
+        try:
+            uploaded_file.seek(0)
+            return pd.read_csv(uploaded_file, header=header, encoding=enc)
+        except Exception:
+            continue
+    uploaded_file.seek(0)
+    return pd.read_csv(uploaded_file, header=header)
 
-def load(file):
-    suffix = Path(file.name).suffix.lower()
-    if suffix == ".csv":
-        for enc in ["utf-8-sig", "cp932", "utf-8", "shift_jis"]:
-            try:
-                file.seek(0)
-                return pd.read_csv(file, encoding=enc)
-            except Exception:
-                continue
-        file.seek(0)
-        return pd.read_csv(file)
-    file.seek(0)
-    return pd.read_excel(file)
+def detect_header_row(raw_df: pd.DataFrame, candidate_cols):
+    candidate_cols = set([normalize_name(x) for x in candidate_cols])
+    max_scan = min(len(raw_df), 10)
+    for i in range(max_scan):
+        vals = set(normalize_name(v) for v in raw_df.iloc[i].tolist())
+        if candidate_cols.issubset(vals):
+            return i
+    return 0
 
-def clean_text_series(s):
-    return s.fillna("").astype(str).str.strip()
+def alias_exists(colset, canonical):
+    aliases = [normalize_name(x) for x in COLUMN_ALIASES.get(canonical, [canonical])]
+    return any(a in colset for a in aliases)
+
+def find_alias(colset, canonical):
+    aliases = [normalize_name(x) for x in COLUMN_ALIASES.get(canonical, [canonical])]
+    for a in aliases:
+        if a in colset:
+            return a
+    return None
+
+def detect_file_kind(df: pd.DataFrame):
+    cols = set(normalize_columns(df).columns)
+    if set(INIT_REQUIRED).issubset(cols):
+        return "initial"
+    if set(STANDARD_REQUIRED).issubset(cols):
+        return "journal_standard"
+    fukushi_core = ["日付", "借方中区分", "貸方中区分", "借方金額", "貸方金額", "摘要文"]
+    if all(alias_exists(cols, c) for c in fukushi_core):
+        return "journal_fukushi"
+    return "unknown"
+
+def parse_file(uploaded_file):
+    raw = read_any_table(uploaded_file, header=None)
+    init_row = detect_header_row(raw, INIT_REQUIRED)
+    standard_row = detect_header_row(raw, STANDARD_REQUIRED)
+    fukushi_row = detect_header_row(raw, [COLUMN_ALIASES[k][0] for k in ["日付","借方中区分","貸方中区分","借方金額","貸方金額","摘要文"]])
+
+    candidates = []
+    for row in [init_row, standard_row, fukushi_row]:
+        try:
+            df = normalize_columns(read_any_table(uploaded_file, header=row))
+            candidates.append(df)
+        except Exception:
+            pass
+
+    for df in candidates:
+        if detect_file_kind(df) == "initial":
+            return "initial", df
+    for df in candidates:
+        if detect_file_kind(df) in ["journal_standard", "journal_fukushi"]:
+            return "journal", df
+
+    raise ValueError("必要列を判定できませんでした。初期残高か仕訳マスタの形式を確認してください。")
+
+def to_num(series):
+    return pd.to_numeric(
+        series.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("¥", "", regex=False)
+        .str.replace("円", "", regex=False)
+        .str.replace("△", "-", regex=False)
+        .str.strip(),
+        errors="coerce"
+    )
+
+def prepare_initial(df):
+    df = normalize_columns(df)
+    missing = [c for c in INIT_REQUIRED if c not in df.columns]
+    if missing:
+        raise ValueError("初期残高に必要列が不足しています: " + ", ".join(missing))
+    out = df.copy()
+    out["基準日"] = pd.to_datetime(out["基準日"], errors="coerce")
+    out["初期残高"] = to_num(out["初期残高"])
+    out["勘定科目"] = out["勘定科目"].fillna("").astype(str).str.strip()
+    out["相手先"] = out["相手先"].fillna("(空欄)").astype(str).str.strip().replace("", "(空欄)")
+    if out["基準日"].isna().any():
+        raise ValueError("初期残高の基準日に日付変換できない値があります。")
+    if out["初期残高"].isna().any():
+        raise ValueError("初期残高に数値変換できない値があります。")
+    return out
+
+def clean_account_name(s):
+    if pd.isna(s):
+        return ""
+    s = str(s).strip()
+    s = pd.Series([s]).str.replace(r"^\([^\)]*\)", "", regex=True).iloc[0].strip()
+    return s
+
+def choose_partner(primary, secondary):
+    p = "" if pd.isna(primary) else str(primary).strip()
+    s = "" if pd.isna(secondary) else str(secondary).strip()
+    return p if p else (s if s else "(空欄)")
+
+def standardize_fukushi_columns(df):
+    df = normalize_columns(df).copy()
+    colset = set(df.columns)
+    rename_map = {}
+    for canonical in COLUMN_ALIASES.keys():
+        found = find_alias(colset, canonical)
+        if found and found != canonical:
+            rename_map[found] = canonical
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    return df
+
+def prepare_journal(df, grain_mode="中区分"):
+    df = normalize_columns(df)
+    kind = detect_file_kind(df)
+
+    if kind == "journal_standard":
+        out = df.copy()
+        out["日付"] = pd.to_datetime(out["日付"], errors="coerce")
+        out["金額"] = to_num(out["金額"])
+        for c in ["借方科目", "貸方科目", "相手先", "摘要"]:
+            out[c] = out[c].fillna("").astype(str).str.strip()
+        out["相手先_借方"] = out["相手先"].replace("", "(空欄)")
+        out["相手先_貸方"] = out["相手先"].replace("", "(空欄)")
+        if "伝票番号" not in out.columns:
+            out["伝票番号"] = ""
+        out["借方中区分表示"] = out["借方科目"]
+        out["貸方中区分表示"] = out["貸方科目"]
+        out["借方小区分表示"] = out["借方科目"]
+        out["貸方小区分表示"] = out["貸方科目"]
+        if out["日付"].isna().any():
+            raise ValueError("仕訳データの日付に日付変換できない値があります。")
+        if out["金額"].isna().any():
+            raise ValueError("仕訳データの金額に数値変換できない値があります。")
+        return out
+
+    if kind == "journal_fukushi":
+        out = standardize_fukushi_columns(df)
+        required = ["日付", "借方中区分", "貸方中区分", "借方金額", "貸方金額", "摘要文"]
+        missing = [c for c in required if c not in out.columns]
+        if missing:
+            raise ValueError("福祉の森データに必要列が不足しています: " + ", ".join(missing))
+
+        out["日付"] = pd.to_datetime(out["日付"], errors="coerce")
+        out["借方金額"] = to_num(out["借方金額"])
+        out["貸方金額"] = to_num(out["貸方金額"])
+        out["金額"] = out["借方金額"].where(out["借方金額"].notna(), out["貸方金額"])
+
+        for c in ["借方小区分","借方補助区分","借方取引先","貸方小区分","貸方補助区分","貸方取引先","伝票番号"]:
+            if c not in out.columns:
+                out[c] = ""
+
+        out["借方中区分表示"] = out["借方中区分"].fillna("").map(clean_account_name)
+        out["貸方中区分表示"] = out["貸方中区分"].fillna("").map(clean_account_name)
+        out["借方小区分表示"] = out["借方小区分"].fillna("").map(clean_account_name)
+        out["貸方小区分表示"] = out["貸方小区分"].fillna("").map(clean_account_name)
+
+        if grain_mode == "小区分":
+            out["借方科目"] = out["借方小区分表示"].where(out["借方小区分表示"] != "", out["借方中区分表示"])
+            out["貸方科目"] = out["貸方小区分表示"].where(out["貸方小区分表示"] != "", out["貸方中区分表示"])
+        else:
+            out["借方科目"] = out["借方中区分表示"]
+            out["貸方科目"] = out["貸方中区分表示"]
+
+        out["相手先_借方"] = [choose_partner(a, b) for a, b in zip(out["借方取引先"], out["貸方取引先"])]
+        out["相手先_貸方"] = [choose_partner(a, b) for a, b in zip(out["貸方取引先"], out["借方取引先"])]
+        out["相手先"] = out["相手先_借方"]
+        out["摘要"] = out["摘要文"].fillna("").astype(str).str.strip()
+
+        if out["日付"].isna().any():
+            raise ValueError("福祉の森データの日付に日付変換できない値があります。")
+        if out["金額"].isna().any():
+            raise ValueError("福祉の森データの金額に数値変換できない値があります。")
+
+        return out
+
+    raise ValueError("仕訳データの形式を認識できませんでした。")
+
+def choose_accounts(initial_df, journal_df, manual_text):
+    manual = [x.strip() for x in manual_text.splitlines() if x.strip()]
+    all_accounts = sorted(
+        {str(x).strip() for x in initial_df["勘定科目"].dropna().tolist()}
+        | {str(x).strip() for x in journal_df["借方科目"].dropna().tolist()}
+        | {str(x).strip() for x in journal_df["貸方科目"].dropna().tolist()}
+    )
+    all_accounts = [x for x in all_accounts if x]
+    if manual:
+        filtered = [a for a in all_accounts if a in manual]
+        return filtered if filtered else all_accounts
+    return all_accounts
+
+def month_options(initial_df, journal_df):
+    base = initial_df["基準日"].max()
+    return sorted(journal_df[journal_df["日付"] > base]["日付"].dt.to_period("M").astype(str).unique().tolist())
+
+def build_summary(initial_df, journal_df, account, target_month):
+    target_period = pd.Period(target_month)
+    month_start = target_period.start_time
+    month_end = target_period.end_time
+    init_base = initial_df["基準日"].max()
+
+    if month_start <= init_base:
+        raise ValueError("対象月が初期残高基準日以前です。基準日より後の月を選択してください。")
+
+    init_acc = initial_df[initial_df["勘定科目"] == account].copy()
+    before = journal_df[(journal_df["日付"] > init_base) & (journal_df["日付"] < month_start)].copy()
+    current = journal_df[(journal_df["日付"] >= month_start) & (journal_df["日付"] <= month_end)].copy()
+
+    init_partner = init_acc.groupby("相手先", dropna=False)["初期残高"].sum().rename("期首初期残高").reset_index()
+    inc_before = before[before["借方科目"] == account].groupby("相手先_借方", dropna=False)["金額"].sum().rename("前月まで増加").reset_index().rename(columns={"相手先_借方": "相手先"})
+    dec_before = before[before["貸方科目"] == account].groupby("相手先_貸方", dropna=False)["金額"].sum().rename("前月まで減少").reset_index().rename(columns={"相手先_貸方": "相手先"})
+    inc_cur = current[current["借方科目"] == account].groupby("相手先_借方", dropna=False)["金額"].sum().rename("当月増加").reset_index().rename(columns={"相手先_借方": "相手先"})
+    dec_cur = current[current["貸方科目"] == account].groupby("相手先_貸方", dropna=False)["金額"].sum().rename("当月減少").reset_index().rename(columns={"相手先_貸方": "相手先"})
+
+    summary = init_partner.merge(inc_before, on="相手先", how="outer") \
+                         .merge(dec_before, on="相手先", how="outer") \
+                         .merge(inc_cur, on="相手先", how="outer") \
+                         .merge(dec_cur, on="相手先", how="outer")
+    if summary.empty:
+        summary = pd.DataFrame({"相手先": []})
+
+    for col in ["期首初期残高", "前月まで増加", "前月まで減少", "当月増加", "当月減少"]:
+        if col not in summary.columns:
+            summary[col] = 0
+        summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0)
+
+    summary["期首残高"] = summary["期首初期残高"] + summary["前月まで増加"] - summary["前月まで減少"]
+    summary["期末残高"] = summary["期首残高"] + summary["当月増加"] - summary["当月減少"]
+    summary["当月動きなし"] = (summary["当月増加"].abs() + summary["当月減少"].abs()) == 0
+    summary["長期残存候補"] = (summary["期首残高"] != 0) & (summary["当月動きなし"])
+    summary["マイナス残高"] = summary["期末残高"] < 0
+
+    latest_note = current[(current["借方科目"] == account) | (current["貸方科目"] == account)].copy()
+    if not latest_note.empty:
+        latest_note["表示相手先"] = latest_note["相手先_借方"]
+        latest_note.loc[latest_note["貸方科目"] == account, "表示相手先"] = latest_note.loc[latest_note["貸方科目"] == account, "相手先_貸方"]
+        latest_note = latest_note.sort_values("日付").groupby("表示相手先", dropna=False)["摘要"].last().reset_index().rename(columns={"表示相手先":"相手先","摘要":"最新摘要"})
+        summary = summary.merge(latest_note, on="相手先", how="left")
+    else:
+        summary["最新摘要"] = ""
+
+    summary = summary[["相手先","最新摘要","期首残高","当月増加","当月減少","期末残高","長期残存候補","マイナス残高"]].copy()
+    summary = summary.sort_values(["期末残高","相手先"], ascending=[False, True]).reset_index(drop=True)
+
+    history_detail = before[(before["借方科目"] == account) | (before["貸方科目"] == account)].copy()
+    current_detail = current[(current["借方科目"] == account) | (current["貸方科目"] == account)].copy()
+
+    for d in [history_detail, current_detail]:
+        d["表示相手先"] = d["相手先_借方"]
+        d.loc[d["貸方科目"] == account, "表示相手先"] = d.loc[d["貸方科目"] == account, "相手先_貸方"]
+
+    return summary, history_detail, current_detail, init_base
+
+def fmt_yen(x):
+    try:
+        return f"{int(round(float(x), 0)):,}"
+    except Exception:
+        return x
+
+def card(label, value, note):
+    st.markdown(f"""
+    <div class="kpi-card">
+        <div class="kpi-label">{label}</div>
+        <div class="kpi-value">{fmt_yen(value)}</div>
+        <div class="kpi-note">{note}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def style_summary(df):
+    show = df.copy()
+    for c in ["期首残高","当月増加","当月減少","期末残高"]:
+        if c in show.columns:
+            show[c] = show[c].apply(fmt_yen)
+    show["長期残存候補"] = show["長期残存候補"].map(lambda x: "⚠" if x else "")
+    show["マイナス残高"] = show["マイナス残高"].map(lambda x: "⚠" if x else "")
+    return show.rename(columns={"長期残存候補":"長期残存","マイナス残高":"マイナス"})
+
+def style_detail(df):
+    cols = [c for c in ["日付","表示相手先","借方科目","貸方科目","借方中区分表示","借方小区分表示","貸方中区分表示","貸方小区分表示","金額","摘要","伝票番号"] if c in df.columns]
+    show = df[cols].copy() if cols else df.copy()
+    rename_map = {
+        "表示相手先":"相手先",
+        "借方中区分表示":"借方中区分",
+        "借方小区分表示":"借方小区分",
+        "貸方中区分表示":"貸方中区分",
+        "貸方小区分表示":"貸方小区分",
+    }
+    show = show.rename(columns=rename_map)
+    if "金額" in show.columns:
+        show["金額"] = show["金額"].apply(fmt_yen)
+    return show
+
+def to_excel(summary, current_detail, history_detail, account, month_text, grain_mode):
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    output = io.BytesIO()
+    cond = pd.DataFrame({"項目":["対象月","勘定科目","集計粒度"], "内容":[month_text, account, grain_mode]})
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        summary.to_excel(writer, sheet_name="相手先別残高", index=False)
+        current_detail.to_excel(writer, sheet_name="当月仕訳明細", index=False)
+        history_detail.to_excel(writer, sheet_name="期首算出用履歴", index=False)
+        cond.to_excel(writer, sheet_name="出力条件", index=False)
+
+        header_fill = PatternFill(fill_type="solid", fgColor="D9E2F3")
+        header_font = Font(bold=True)
+        center = Alignment(horizontal="center", vertical="center")
+
+        for sheet_name, df in {
+            "相手先別残高": summary,
+            "当月仕訳明細": current_detail,
+            "期首算出用履歴": history_detail,
+            "出力条件": cond,
+        }.items():
+            ws = writer.sheets[sheet_name]
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = center
+
+            for col_idx, col_name in enumerate(df.columns, start=1):
+                max_len = len(str(col_name))
+                for row in range(2, ws.max_row + 1):
+                    value = ws.cell(row=row, column=col_idx).value
+                    if value is not None:
+                        max_len = max(max_len, len(str(value)))
+                    if col_name in ["期首残高","当月増加","当月減少","期末残高","金額"]:
+                        ws.cell(row=row, column=col_idx).number_format = '#,##0'
+                ws.column_dimensions[get_column_letter(col_idx)].width = max(12, min(32, max_len + 2))
+
+    output.seek(0)
+    return output.getvalue()
+
+st.title("📘 会計内訳アプリ Pro 福祉の森完全対応版")
+st.caption("前の機能を残したまま、中区分 / 小区分 の切替を追加した版です。")
 
 with st.sidebar:
-    init_file = st.file_uploader("①初期残高", type=["csv","xlsx","xls"])
-    journal_file = st.file_uploader("②仕訳データ", type=["csv","xlsx","xls"])
-    mode = st.radio("集計粒度", ["中区分","小区分"])
+    with st.expander("データ読み込み", expanded=True):
+        init_file = st.file_uploader("① 初期残高データ", type=["csv","xlsx","xlsm","xls"], key="init")
+        journal_file = st.file_uploader("② 全期間仕訳マスタ（福祉の森CSV可）", type=["csv","xlsx","xlsm","xls"], key="journal")
+
+    with st.expander("表示条件", expanded=True):
+        bs_text = st.text_area("対象勘定科目（改行区切り）", value="\n".join(BS_DEFAULT), height=220)
+        grain_mode = st.radio("集計粒度", ["中区分", "小区分"], index=0)
+        hide_zero_partner = st.checkbox("期末残高ゼロの相手先を非表示", value=True)
+        only_flags = st.checkbox("注意行のみ表示", value=False)
+        partner_search = st.text_input("相手先検索")
+
+    with st.expander("入力ルール", expanded=False):
+        st.markdown("""
+        - 上：初期残高データ  
+        - 下：全期間仕訳マスタ or 福祉の森仕訳日記帳CSV  
+        - 福祉の森の列名ゆらぎを吸収  
+        - 中区分 / 小区分 の切替に対応  
+        - 2ヶ月以上動きがない残高は長期残存候補として⚠表示
+        """)
 
 if init_file and journal_file:
     try:
-        init = load(init_file)
-        j = map_columns(load(journal_file))
+        kind1, df1 = parse_file(init_file)
+        kind2, df2 = parse_file(journal_file)
 
-        required = ["日付","借方金額","貸方金額"]
-        miss = [c for c in required if c not in j.columns]
-        if miss:
-            st.error("仕訳データに必要列がありません: " + ", ".join(miss))
-            st.stop()
+        if kind1 == "journal" and kind2 == "initial":
+            kind1, kind2 = kind2, kind1
+            df1, df2 = df2, df1
+            st.info("アップロード順を自動補正しました。")
 
-        j["日付"] = pd.to_datetime(j["日付"], errors="coerce")
-        j["借方金額"] = pd.to_numeric(j["借方金額"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0)
-        j["貸方金額"] = pd.to_numeric(j["貸方金額"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0)
+        if kind1 != "initial" or kind2 != "journal":
+            raise ValueError("上に初期残高、下に仕訳データをアップロードしてください。")
 
-        if mode == "中区分":
-            if "借方中区分" not in j.columns or "貸方中区分" not in j.columns:
-                st.error("中区分列が見つかりません。")
-                st.stop()
-            j["借方科目"] = clean_text_series(j["借方中区分"])
-            j["貸方科目"] = clean_text_series(j["貸方中区分"])
-        else:
-            if "借方小区分" not in j.columns or "貸方小区分" not in j.columns:
-                st.error("小区分列が見つかりません。")
-                st.stop()
-            j["借方科目"] = clean_text_series(j["借方小区分"])
-            j["貸方科目"] = clean_text_series(j["貸方小区分"])
+        initial_df = prepare_initial(df1)
+        journal_df = prepare_journal(df2, grain_mode=grain_mode)
 
-        if "摘要" not in j.columns:
-            j["摘要"] = ""
-        j["摘要"] = clean_text_series(j["摘要"])
+        accounts = choose_accounts(initial_df, journal_df, bs_text)
+        months = month_options(initial_df, journal_df)
+        if not months:
+            raise ValueError("初期残高基準日より後の仕訳月がありません。")
 
-        account_list = sorted(set(j["借方科目"]) | set(j["貸方科目"]))
-        account_list = [x for x in account_list if x not in ["", "nan", "None"]]
+        c1, c2 = st.columns([1,1])
+        with c1:
+            target_month = st.selectbox("対象月", months, index=len(months)-1)
+        with c2:
+            account = st.selectbox("勘定科目", accounts)
 
-        if not account_list:
-            st.error("勘定科目候補が作れませんでした。")
-            st.stop()
+        summary, history_detail, current_detail, init_base = build_summary(initial_df, journal_df, account, target_month)
 
-        account = st.selectbox("勘定科目", account_list)
+        if hide_zero_partner:
+            summary = summary[summary["期末残高"] != 0].copy()
+        if only_flags:
+            summary = summary[(summary["長期残存候補"]) | (summary["マイナス残高"])].copy()
+        if partner_search:
+            summary = summary[summary["相手先"].astype(str).str.contains(partner_search, case=False, na=False)].copy()
 
-        df = j[(j["借方科目"] == account) | (j["貸方科目"] == account)].copy()
-        df["増減"] = df["借方金額"] - df["貸方金額"]
+        first_row = summary.iloc[0] if not summary.empty else pd.Series({"期首残高":0,"当月増加":0,"当月減少":0,"期末残高":0})
 
-        show_cols = [c for c in ["日付","借方科目","貸方科目","借方金額","貸方金額","摘要"] if c in df.columns]
-        show = df[show_cols + ["増減"]].copy()
+        st.markdown(
+            f'<div class="info-box">基準日: {init_base.date()} / 対象月: {target_month} / 勘定科目: {account} / 集計粒度: {grain_mode}</div>',
+            unsafe_allow_html=True
+        )
 
-        for c in ["借方金額","貸方金額","増減"]:
-            if c in show.columns:
-                show[c] = show[c].apply(lambda x: f"{int(round(x)):,}")
+        k1, k2, k3, k4 = st.columns(4)
+        with k1: card("期首残高", first_row["期首残高"], "前月末時点の残高")
+        with k2: card("当月増加", first_row["当月増加"], "当月借方計上")
+        with k3: card("当月減少", first_row["当月減少"], "当月貸方計上")
+        with k4: card("期末残高", first_row["期末残高"], "対象月末の残高")
 
-        st.subheader("仕訳明細")
-        st.dataframe(show, use_container_width=True, hide_index=True)
+        tab1, tab2, tab3, tab4 = st.tabs(["相手先別残高", "当月仕訳明細", "期首算出用履歴", "Excel出力"])
 
-        total = df["増減"].sum()
-        st.subheader("合計")
-        st.write(f"{int(round(total)):,}")
+        with tab1:
+            st.dataframe(style_summary(summary), use_container_width=True, hide_index=True)
+
+        with tab2:
+            st.dataframe(style_detail(current_detail), use_container_width=True, hide_index=True)
+
+        with tab3:
+            st.dataframe(style_detail(history_detail), use_container_width=True, hide_index=True)
+
+        with tab4:
+            excel_bytes = to_excel(summary, style_detail(current_detail), style_detail(history_detail), account, target_month, grain_mode)
+            st.download_button(
+                "Excelダウンロード",
+                data=excel_bytes,
+                file_name=f"会計内訳_{target_month}_{account}_{grain_mode}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
     except Exception as e:
-        st.error(f"読み込みエラー: {e}")
+        st.error(f"読み込みエラー：{e}")
 else:
-    st.info("ファイルをアップロードしてください")
+    st.markdown('<div class="subtle-box">左のサイドバーで、上に初期残高データ、下に福祉の森CSVを入れてください。</div>', unsafe_allow_html=True)
