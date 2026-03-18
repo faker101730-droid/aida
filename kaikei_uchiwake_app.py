@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="会計内訳アプリ Pro", page_icon="📘", layout="wide")
+st.set_page_config(page_title="会計内訳アプリ Pro ", page_icon="📘", layout="wide")
 
 st.markdown("""
 <style>
@@ -333,19 +333,38 @@ def build_summary(initial_df, journal_df, account, target_month):
     summary["期首残高"] = summary["期首初期残高"] + summary["前月まで増加"] - summary["前月まで減少"]
     summary["期末残高"] = summary["期首残高"] + summary["当月増加"] - summary["当月減少"]
     summary["当月動きなし"] = (summary["当月増加"].abs() + summary["当月減少"].abs()) == 0
-    summary["長期残存候補"] = (summary["期首残高"] != 0) & (summary["当月動きなし"])
     summary["マイナス残高"] = summary["期末残高"] < 0
+
+    movement = pd.concat([
+        before[before["借方科目"] == account][["日付", "相手先_借方"]].rename(columns={"相手先_借方": "相手先"}),
+        before[before["貸方科目"] == account][["日付", "相手先_貸方"]].rename(columns={"相手先_貸方": "相手先"}),
+        current[current["借方科目"] == account][["日付", "相手先_借方"]].rename(columns={"相手先_借方": "相手先"}),
+        current[current["貸方科目"] == account][["日付", "相手先_貸方"]].rename(columns={"相手先_貸方": "相手先"}),
+    ], ignore_index=True)
+
+    if not movement.empty:
+        last_move = movement.groupby("相手先", dropna=False)["日付"].max().reset_index().rename(columns={"日付": "最終更新日"})
+        summary = summary.merge(last_move, on="相手先", how="left")
+        summary["最終更新日"] = pd.to_datetime(summary["最終更新日"], errors="coerce")
+        summary["経過日数"] = (month_end.normalize() - summary["最終更新日"]).dt.days
+        summary["長期残存候補"] = (summary["期末残高"] != 0) & (summary["経過日数"] >= 60)
+    else:
+        summary["最終更新日"] = pd.NaT
+        summary["経過日数"] = None
+        summary["長期残存候補"] = False
 
     latest_note = current[(current["借方科目"] == account) | (current["貸方科目"] == account)].copy()
     if not latest_note.empty:
         latest_note["表示相手先"] = latest_note["相手先_借方"]
         latest_note.loc[latest_note["貸方科目"] == account, "表示相手先"] = latest_note.loc[latest_note["貸方科目"] == account, "相手先_貸方"]
         latest_note = latest_note.sort_values("日付").groupby("表示相手先", dropna=False)["摘要"].last().reset_index().rename(columns={"表示相手先":"相手先","摘要":"最新摘要"})
+        latest_note["最新摘要"] = latest_note["最新摘要"].fillna("").astype(str)
         summary = summary.merge(latest_note, on="相手先", how="left")
     else:
         summary["最新摘要"] = ""
+    summary["最新摘要"] = summary["最新摘要"].fillna("").replace("None", "")
 
-    summary = summary[["相手先","最新摘要","期首残高","当月増加","当月減少","期末残高","長期残存候補","マイナス残高"]].copy()
+    summary = summary[["相手先","最新摘要","最終更新日","期首残高","当月増加","当月減少","期末残高","長期残存候補","マイナス残高"]].copy()
     summary = summary.sort_values(["期末残高","相手先"], ascending=[False, True]).reset_index(drop=True)
 
     history_detail = before[(before["借方科目"] == account) | (before["貸方科目"] == account)].copy()
@@ -353,7 +372,9 @@ def build_summary(initial_df, journal_df, account, target_month):
 
     for d in [history_detail, current_detail]:
         d["表示相手先"] = d["相手先_借方"]
+        d["対象側"] = "借方"
         d.loc[d["貸方科目"] == account, "表示相手先"] = d.loc[d["貸方科目"] == account, "相手先_貸方"]
+        d.loc[d["貸方科目"] == account, "対象側"] = "貸方"
 
     return summary, history_detail, current_detail, init_base
 
@@ -374,6 +395,10 @@ def card(label, value, note):
 
 def style_summary(df):
     show = df.copy()
+    if "最新摘要" in show.columns:
+        show["最新摘要"] = show["最新摘要"].fillna("").replace("None", "")
+    if "最終更新日" in show.columns:
+        show["最終更新日"] = pd.to_datetime(show["最終更新日"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
     for c in ["期首残高","当月増加","当月減少","期末残高"]:
         if c in show.columns:
             show[c] = show[c].apply(fmt_yen)
@@ -382,7 +407,7 @@ def style_summary(df):
     return show.rename(columns={"長期残存候補":"長期残存","マイナス残高":"マイナス"})
 
 def style_detail(df):
-    cols = [c for c in ["日付","表示相手先","借方科目","貸方科目","借方中区分表示","借方小区分表示","貸方中区分表示","貸方小区分表示","金額","摘要","伝票番号"] if c in df.columns]
+    cols = [c for c in ["日付","対象側","表示相手先","借方科目","貸方科目","借方中区分表示","借方小区分表示","貸方中区分表示","貸方小区分表示","金額","摘要","伝票番号"] if c in df.columns]
     show = df[cols].copy() if cols else df.copy()
     rename_map = {
         "表示相手先":"相手先",
@@ -523,6 +548,7 @@ if init_file and journal_file:
 
         with tab2:
             st.dataframe(style_detail(current_detail), use_container_width=True, hide_index=True)
+            st.caption("明細には1つの仕訳の借方科目・貸方科目の両方を表示しています。選択勘定科目の反対側科目も根拠確認のため表示されます。")
 
         with tab3:
             st.dataframe(style_detail(history_detail), use_container_width=True, hide_index=True)
