@@ -173,10 +173,28 @@ def clean_account_name(s):
     s = pd.Series([s]).str.replace(r"^\([^\)]*\)", "", regex=True).iloc[0].strip()
     return s
 
+
+def make_display_counterparty(primary_partner, small_label, sub_label, note):
+    primary = "" if pd.isna(primary_partner) else str(primary_partner).strip()
+    small = "" if pd.isna(small_label) else str(small_label).strip()
+    sub = "" if pd.isna(sub_label) else str(sub_label).strip()
+    note = "" if pd.isna(note) else str(note).strip()
+
+    if primary:
+        return primary
+    if sub:
+        return f"補助:{sub}"
+    if small:
+        return f"小区分:{small}"
+    if note:
+        short_note = note[:24] + ("…" if len(note) > 24 else "")
+        return f"摘要:{short_note}"
+    return "(空欄)"
+
 def choose_partner(primary, secondary):
     p = "" if pd.isna(primary) else str(primary).strip()
     s = "" if pd.isna(secondary) else str(secondary).strip()
-    return p if p else (s if s else "(空欄)")
+    return p if p else s
 
 def standardize_fukushi_columns(df):
     df = normalize_columns(df).copy()
@@ -208,6 +226,8 @@ def prepare_journal(df, grain_mode="中区分"):
         out["貸方中区分表示"] = out["貸方科目"]
         out["借方小区分表示"] = out["借方科目"]
         out["貸方小区分表示"] = out["貸方科目"]
+        out["借方補助区分"] = out.get("借方補助区分", "")
+        out["貸方補助区分"] = out.get("貸方補助区分", "")
         if out["日付"].isna().any():
             raise ValueError("仕訳データの日付に日付変換できない値があります。")
         if out["金額"].isna().any():
@@ -242,10 +262,16 @@ def prepare_journal(df, grain_mode="中区分"):
             out["借方科目"] = out["借方中区分表示"]
             out["貸方科目"] = out["貸方中区分表示"]
 
-        out["相手先_借方"] = [choose_partner(a, b) for a, b in zip(out["借方取引先"], out["貸方取引先"])]
-        out["相手先_貸方"] = [choose_partner(a, b) for a, b in zip(out["貸方取引先"], out["借方取引先"])]
-        out["相手先"] = out["相手先_借方"]
         out["摘要"] = out["摘要文"].fillna("").astype(str).str.strip()
+        out["相手先_借方"] = [
+            make_display_counterparty(a, s, b, n)
+            for a, s, b, n in zip(out["借方取引先"], out["借方小区分表示"], out["借方補助区分"], out["摘要"])
+        ]
+        out["相手先_貸方"] = [
+            make_display_counterparty(a, s, b, n)
+            for a, s, b, n in zip(out["貸方取引先"], out["貸方小区分表示"], out["貸方補助区分"], out["摘要"])
+        ]
+        out["相手先"] = out["相手先_借方"]
 
         if out["日付"].isna().any():
             raise ValueError("福祉の森データの日付に日付変換できない値があります。")
@@ -472,7 +498,12 @@ if init_file and journal_file:
         if partner_search:
             summary = summary[summary["相手先"].astype(str).str.contains(partner_search, case=False, na=False)].copy()
 
-        first_row = summary.iloc[0] if not summary.empty else pd.Series({"期首残高":0,"当月増加":0,"当月減少":0,"期末残高":0})
+        total_row = pd.Series({
+            "期首残高": summary["期首残高"].astype(float).sum() if not summary.empty else 0,
+            "当月増加": summary["当月増加"].astype(float).sum() if not summary.empty else 0,
+            "当月減少": summary["当月減少"].astype(float).sum() if not summary.empty else 0,
+            "期末残高": summary["期末残高"].astype(float).sum() if not summary.empty else 0,
+        })
 
         st.markdown(
             f'<div class="info-box">基準日: {init_base.date()} / 対象月: {target_month} / 勘定科目: {account} / 集計粒度: {grain_mode}</div>',
@@ -480,10 +511,10 @@ if init_file and journal_file:
         )
 
         k1, k2, k3, k4 = st.columns(4)
-        with k1: card("期首残高", first_row["期首残高"], "前月末時点の残高")
-        with k2: card("当月増加", first_row["当月増加"], "当月借方計上")
-        with k3: card("当月減少", first_row["当月減少"], "当月貸方計上")
-        with k4: card("期末残高", first_row["期末残高"], "対象月末の残高")
+        with k1: card("期首残高", total_row["期首残高"], "勘定科目全体の前月末残高")
+        with k2: card("当月増加", total_row["当月増加"], "勘定科目全体の当月借方計上")
+        with k3: card("当月減少", total_row["当月減少"], "勘定科目全体の当月貸方計上")
+        with k4: card("期末残高", total_row["期末残高"], "勘定科目全体の対象月末残高")
 
         tab1, tab2, tab3, tab4 = st.tabs(["相手先別残高", "当月仕訳明細", "期首算出用履歴", "Excel出力"])
 
