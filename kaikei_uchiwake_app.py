@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="会計内訳アプリ Pro 福祉の森完全対応版", page_icon="📘", layout="wide")
+st.set_page_config(page_title="会計内訳アプリ Pro", page_icon="📘", layout="wide")
 
 st.markdown("""
 <style>
