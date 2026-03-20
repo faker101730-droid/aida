@@ -299,24 +299,35 @@ def month_options(initial_df, journal_df):
     base = initial_df["基準日"].max()
     return sorted(journal_df[journal_df["日付"] > base]["日付"].dt.to_period("M").astype(str).unique().tolist())
 
-def build_summary(initial_df, journal_df, account, target_month):
-    target_period = pd.Period(target_month)
-    month_start = target_period.start_time
-    month_end = target_period.end_time
+def make_period_labels(display_mode, start_month, end_month):
+    if display_mode == "単月" or start_month == end_month:
+        return start_month, f"対象月: {start_month}"
+    return f"{start_month}_to_{end_month}", f"対象期間: {start_month} ～ {end_month}"
+
+def build_summary(initial_df, journal_df, account, start_month, end_month=None, mode="単月"):
+    if end_month is None:
+        end_month = start_month
+
+    start_period = pd.Period(start_month)
+    end_period = pd.Period(end_month)
+    period_start = start_period.start_time
+    period_end = end_period.end_time
     init_base = initial_df["基準日"].max()
 
-    if month_start <= init_base:
-        raise ValueError("対象月が初期残高基準日以前です。基準日より後の月を選択してください。")
+    if period_start <= init_base:
+        raise ValueError("開始月が初期残高基準日以前です。基準日より後の月を選択してください。")
+    if end_period < start_period:
+        raise ValueError("終了月は開始月以降を選択してください。")
 
     init_acc = initial_df[initial_df["勘定科目"] == account].copy()
-    before = journal_df[(journal_df["日付"] > init_base) & (journal_df["日付"] < month_start)].copy()
-    current = journal_df[(journal_df["日付"] >= month_start) & (journal_df["日付"] <= month_end)].copy()
+    before = journal_df[(journal_df["日付"] > init_base) & (journal_df["日付"] < period_start)].copy()
+    current = journal_df[(journal_df["日付"] >= period_start) & (journal_df["日付"] <= period_end)].copy()
 
     init_partner = init_acc.groupby("相手先", dropna=False)["初期残高"].sum().rename("期首初期残高").reset_index()
-    inc_before = before[before["借方科目"] == account].groupby("相手先_借方", dropna=False)["金額"].sum().rename("前月まで増加").reset_index().rename(columns={"相手先_借方": "相手先"})
-    dec_before = before[before["貸方科目"] == account].groupby("相手先_貸方", dropna=False)["金額"].sum().rename("前月まで減少").reset_index().rename(columns={"相手先_貸方": "相手先"})
-    inc_cur = current[current["借方科目"] == account].groupby("相手先_借方", dropna=False)["金額"].sum().rename("当月増加").reset_index().rename(columns={"相手先_借方": "相手先"})
-    dec_cur = current[current["貸方科目"] == account].groupby("相手先_貸方", dropna=False)["金額"].sum().rename("当月減少").reset_index().rename(columns={"相手先_貸方": "相手先"})
+    inc_before = before[before["借方科目"] == account].groupby("相手先_借方", dropna=False)["金額"].sum().rename("前期間まで増加").reset_index().rename(columns={"相手先_借方": "相手先"})
+    dec_before = before[before["貸方科目"] == account].groupby("相手先_貸方", dropna=False)["金額"].sum().rename("前期間まで減少").reset_index().rename(columns={"相手先_貸方": "相手先"})
+    inc_cur = current[current["借方科目"] == account].groupby("相手先_借方", dropna=False)["金額"].sum().rename("対象期間増加").reset_index().rename(columns={"相手先_借方": "相手先"})
+    dec_cur = current[current["貸方科目"] == account].groupby("相手先_貸方", dropna=False)["金額"].sum().rename("対象期間減少").reset_index().rename(columns={"相手先_貸方": "相手先"})
 
     summary = init_partner.merge(inc_before, on="相手先", how="outer") \
                          .merge(dec_before, on="相手先", how="outer") \
@@ -325,14 +336,14 @@ def build_summary(initial_df, journal_df, account, target_month):
     if summary.empty:
         summary = pd.DataFrame({"相手先": []})
 
-    for col in ["期首初期残高", "前月まで増加", "前月まで減少", "当月増加", "当月減少"]:
+    for col in ["期首初期残高", "前期間まで増加", "前期間まで減少", "対象期間増加", "対象期間減少"]:
         if col not in summary.columns:
             summary[col] = 0
         summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0)
 
-    summary["期首残高"] = summary["期首初期残高"] + summary["前月まで増加"] - summary["前月まで減少"]
-    summary["期末残高"] = summary["期首残高"] + summary["当月増加"] - summary["当月減少"]
-    summary["当月動きなし"] = (summary["当月増加"].abs() + summary["当月減少"].abs()) == 0
+    summary["期首残高"] = summary["期首初期残高"] + summary["前期間まで増加"] - summary["前期間まで減少"]
+    summary["期末残高"] = summary["期首残高"] + summary["対象期間増加"] - summary["対象期間減少"]
+    summary["対象期間動きなし"] = (summary["対象期間増加"].abs() + summary["対象期間減少"].abs()) == 0
     summary["マイナス残高"] = summary["期末残高"] < 0
 
     movement = pd.concat([
@@ -346,7 +357,7 @@ def build_summary(initial_df, journal_df, account, target_month):
         last_move = movement.groupby("相手先", dropna=False)["日付"].max().reset_index().rename(columns={"日付": "最終更新日"})
         summary = summary.merge(last_move, on="相手先", how="left")
         summary["最終更新日"] = pd.to_datetime(summary["最終更新日"], errors="coerce")
-        summary["経過日数"] = (month_end.normalize() - summary["最終更新日"]).dt.days
+        summary["経過日数"] = (period_end.normalize() - summary["最終更新日"]).dt.days
         summary["長期残存候補"] = (summary["期末残高"] != 0) & (summary["経過日数"] >= 60)
     else:
         summary["最終更新日"] = pd.NaT
@@ -364,19 +375,21 @@ def build_summary(initial_df, journal_df, account, target_month):
         summary["最新摘要"] = ""
     summary["最新摘要"] = summary["最新摘要"].fillna("").replace("None", "")
 
-    summary = summary[["相手先","最新摘要","最終更新日","期首残高","当月増加","当月減少","期末残高","長期残存候補","マイナス残高"]].copy()
+    summary = summary[["相手先","最新摘要","最終更新日","期首残高","対象期間増加","対象期間減少","期末残高","長期残存候補","マイナス残高"]].copy()
     summary = summary.sort_values(["期末残高","相手先"], ascending=[False, True]).reset_index(drop=True)
 
     history_detail = before[(before["借方科目"] == account) | (before["貸方科目"] == account)].copy()
     current_detail = current[(current["借方科目"] == account) | (current["貸方科目"] == account)].copy()
 
     for d in [history_detail, current_detail]:
+        if d.empty:
+            continue
         d["表示相手先"] = d["相手先_借方"]
         d["対象側"] = "借方"
         d.loc[d["貸方科目"] == account, "表示相手先"] = d.loc[d["貸方科目"] == account, "相手先_貸方"]
         d.loc[d["貸方科目"] == account, "対象側"] = "貸方"
 
-    return summary, history_detail, current_detail, init_base
+    return summary, history_detail, current_detail, init_base, period_start, period_end
 
 def fmt_yen(x):
     try:
