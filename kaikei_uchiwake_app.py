@@ -399,12 +399,12 @@ def style_summary(df):
         show["最新摘要"] = show["最新摘要"].fillna("").replace("None", "")
     if "最終更新日" in show.columns:
         show["最終更新日"] = pd.to_datetime(show["最終更新日"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
-    for c in ["期首残高","当月増加","当月減少","期末残高"]:
+    for c in ["期首残高","対象期間増加","対象期間減少","期末残高"]:
         if c in show.columns:
             show[c] = show[c].apply(fmt_yen)
     show["長期残存候補"] = show["長期残存候補"].map(lambda x: "⚠" if x else "")
     show["マイナス残高"] = show["マイナス残高"].map(lambda x: "⚠" if x else "")
-    return show.rename(columns={"長期残存候補":"長期残存","マイナス残高":"マイナス"})
+    return show.rename(columns={"対象期間増加":"増加","対象期間減少":"減少","長期残存候補":"長期残存","マイナス残高":"マイナス"})
 
 def style_detail(df):
     cols = [c for c in ["日付","対象側","表示相手先","借方科目","貸方科目","借方中区分表示","借方小区分表示","貸方中区分表示","貸方小区分表示","金額","摘要","伝票番号"] if c in df.columns]
@@ -421,12 +421,12 @@ def style_detail(df):
         show["金額"] = show["金額"].apply(fmt_yen)
     return show
 
-def to_excel(summary, current_detail, history_detail, account, month_text, grain_mode):
+def to_excel(summary, current_detail, history_detail, account, period_text, grain_mode, display_mode):
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
 
     output = io.BytesIO()
-    cond = pd.DataFrame({"項目":["対象月","勘定科目","集計粒度"], "内容":[month_text, account, grain_mode]})
+    cond = pd.DataFrame({"項目":["表示モード","対象期間","勘定科目","集計粒度"], "内容":[display_mode, period_text, account, grain_mode]})
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         summary.to_excel(writer, sheet_name="相手先別残高", index=False)
@@ -456,7 +456,7 @@ def to_excel(summary, current_detail, history_detail, account, month_text, grain
                     value = ws.cell(row=row, column=col_idx).value
                     if value is not None:
                         max_len = max(max_len, len(str(value)))
-                    if col_name in ["期首残高","当月増加","当月減少","期末残高","金額"]:
+                    if col_name in ["期首残高","対象期間増加","対象期間減少","期末残高","増加","減少","金額"]:
                         ws.cell(row=row, column=col_idx).number_format = '#,##0'
                 ws.column_dimensions[get_column_letter(col_idx)].width = max(12, min(32, max_len + 2))
 
@@ -484,6 +484,7 @@ with st.sidebar:
         - 下：全期間仕訳マスタ or 福祉の森仕訳日記帳CSV  
         - 福祉の森の列名ゆらぎを吸収  
         - 中区分 / 小区分 の切替に対応  
+        - 単月 / 期間累計 の切替に対応  
         - 2ヶ月以上動きがない残高は長期残存候補として⚠表示
         """)
 
@@ -508,13 +509,26 @@ if init_file and journal_file:
         if not months:
             raise ValueError("初期残高基準日より後の仕訳月がありません。")
 
-        c1, c2 = st.columns([1,1])
+        c1, c2, c3, c4 = st.columns([1,1,1,1])
         with c1:
-            target_month = st.selectbox("対象月", months, index=len(months)-1)
+            display_mode = st.radio("表示モード", ["単月", "期間累計"], horizontal=True)
         with c2:
+            start_month = st.selectbox("開始月", months, index=len(months)-1)
+        with c3:
+            start_idx = months.index(start_month)
+            if display_mode == "期間累計":
+                end_month_candidates = months[start_idx:]
+                end_month = st.selectbox("終了月", end_month_candidates, index=len(end_month_candidates)-1)
+            else:
+                end_month = start_month
+                st.selectbox("終了月", [start_month], index=0, disabled=True)
+        with c4:
             account = st.selectbox("勘定科目", accounts)
 
-        summary, history_detail, current_detail, init_base = build_summary(initial_df, journal_df, account, target_month)
+        period_text, period_label = make_period_labels(display_mode, start_month, end_month)
+        summary, history_detail, current_detail, init_base, period_start, period_end = build_summary(
+            initial_df, journal_df, account, start_month, end_month=end_month, mode=display_mode
+        )
 
         if hide_zero_partner:
             summary = summary[summary["期末残高"] != 0].copy()
@@ -525,23 +539,24 @@ if init_file and journal_file:
 
         total_row = pd.Series({
             "期首残高": summary["期首残高"].astype(float).sum() if not summary.empty else 0,
-            "当月増加": summary["当月増加"].astype(float).sum() if not summary.empty else 0,
-            "当月減少": summary["当月減少"].astype(float).sum() if not summary.empty else 0,
+            "対象期間増加": summary["対象期間増加"].astype(float).sum() if not summary.empty else 0,
+            "対象期間減少": summary["対象期間減少"].astype(float).sum() if not summary.empty else 0,
             "期末残高": summary["期末残高"].astype(float).sum() if not summary.empty else 0,
         })
 
         st.markdown(
-            f'<div class="info-box">基準日: {init_base.date()} / 対象月: {target_month} / 勘定科目: {account} / 集計粒度: {grain_mode}</div>',
+            f'<div class="info-box">基準日: {init_base.date()} / {period_label} / 勘定科目: {account} / 集計粒度: {grain_mode} / 表示モード: {display_mode}</div>',
             unsafe_allow_html=True
         )
 
         k1, k2, k3, k4 = st.columns(4)
-        with k1: card("期首残高", total_row["期首残高"], "勘定科目全体の前月末残高")
-        with k2: card("当月増加", total_row["当月増加"], "勘定科目全体の当月借方計上")
-        with k3: card("当月減少", total_row["当月減少"], "勘定科目全体の当月貸方計上")
-        with k4: card("期末残高", total_row["期末残高"], "勘定科目全体の対象月末残高")
+        with k1: card("期首残高", total_row["期首残高"], "勘定科目全体の対象期間開始時点残高")
+        with k2: card("増加", total_row["対象期間増加"], "勘定科目全体の対象期間借方計上")
+        with k3: card("減少", total_row["対象期間減少"], "勘定科目全体の対象期間貸方計上")
+        with k4: card("期末残高", total_row["期末残高"], "勘定科目全体の対象期間終了時点残高")
 
-        tab1, tab2, tab3, tab4 = st.tabs(["相手先別残高", "当月仕訳明細", "期首算出用履歴", "Excel出力"])
+        detail_tab_name = "当月仕訳明細" if display_mode == "単月" else "対象期間仕訳明細"
+        tab1, tab2, tab3, tab4 = st.tabs(["相手先別残高", detail_tab_name, "期首算出用履歴", "Excel出力"])
 
         with tab1:
             st.dataframe(style_summary(summary), use_container_width=True, hide_index=True)
@@ -554,11 +569,11 @@ if init_file and journal_file:
             st.dataframe(style_detail(history_detail), use_container_width=True, hide_index=True)
 
         with tab4:
-            excel_bytes = to_excel(summary, style_detail(current_detail), style_detail(history_detail), account, target_month, grain_mode)
+            excel_bytes = to_excel(summary, style_detail(current_detail), style_detail(history_detail), account, period_text, grain_mode, display_mode)
             st.download_button(
                 "Excelダウンロード",
                 data=excel_bytes,
-                file_name=f"会計内訳_{target_month}_{account}_{grain_mode}.xlsx",
+                file_name=f"会計内訳_{period_text}_{account}_{grain_mode}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
