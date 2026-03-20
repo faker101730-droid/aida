@@ -8,7 +8,7 @@ st.set_page_config(page_title="会計内訳アプリ Pro ", page_icon="📘", la
 
 st.markdown("""
 <style>
-.block-container {padding-top: 1.0rem; padding-bottom: 2rem;}
+.block-container {padding-top: 1.6rem; padding-bottom: 2rem;}
 .kpi-card {
     background: linear-gradient(135deg, #0f172a 0%, #111827 100%);
     border: 1px solid #334155;
@@ -476,6 +476,7 @@ def to_excel(summary, current_detail, history_detail, account, period_text, grai
     output.seek(0)
     return output.getvalue()
 
+st.markdown("<div style='height:0.35rem;'></div>", unsafe_allow_html=True)
 st.title("📘 会計内訳アプリ Pro 福祉の森完全対応版")
 st.caption("前の機能を残したまま、中区分 / 小区分 の切替を追加した版です。")
 
